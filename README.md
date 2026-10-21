@@ -7,8 +7,8 @@ An unofficial Chrome Manifest V3 port of the [Mullvad browser extension](https:/
 ## What it does
 
 - Select a Mullvad SOCKS5 server for the browser or individual destination hosts.
-- Manage website rules, exclusions, session-random routing, and location history.
-- Inspect IPv4, IPv6, and DNS observations through Mullvad's connection-check services.
+- Manage website rules, exclusions, session-random routing, favorites, and location history.
+- Check IPv4, IPv6, and DNS through Mullvad's connection-check services when the popup opens and after each routing change.
 - Configure supported Chrome privacy controls and import compatible Firefox settings exports.
 
 Mullvad SOCKS5 servers require an existing Mullvad VPN connection. The extension does not create a VPN tunnel.
@@ -17,13 +17,13 @@ Mullvad SOCKS5 servers require an existing Mullvad VPN connection. The extension
 
 <p align="center">
   <img src="docs/screenshots/popup.png" width="32%" alt="Popup with the proxy on for all websites through Gothenburg, Sweden, except two website rules and one exclusion" />
-  <img src="docs/screenshots/locations.png" width="32%" alt="Location picker filtered to Swedish relays, with se-got-001 marked in use" />
-  <img src="docs/screenshots/connection-check.png" width="32%" alt="IPv4, IPv6 and DNS checks, each reporting Mullvad" />
+  <img src="docs/screenshots/current-site.png" width="32%" alt="Current website news.example.org following the global location, above IPv4, IPv6 and DNS checks that each report Mullvad" />
+  <img src="docs/screenshots/locations.png" width="32%" alt="Location picker with two favorites and two recent locations above the full relay list" />
 </p>
-<p align="center"><sub>The popup, the relay picker and the connection checks. The checks show example addresses.</sub></p>
+<p align="center"><sub>The popup, the current website with its connection checks, and the location picker. The checks show example addresses.</sub></p>
 
 <p align="center">
-  <img src="docs/screenshots/options.png" width="75%" alt="Options page with the global route, three website rules and one exclusion" />
+  <img src="docs/screenshots/options.png" width="75%" alt="Options page with the global route, two website rules and one exclusion" />
 </p>
 <p align="center"><sub>Routing settings, website rules and exclusions on the options page.</sub></p>
 
@@ -59,7 +59,7 @@ The extension uses mandatory Chrome PAC configuration and does not append a dire
 
 Connection checks describe the browser route used by the check request. They do not establish the active website's route or prevent DNS leaks. Chrome's WebRTC control restricts non-proxied UDP; it does not disable WebRTC. Firefox's per-site proxy DNS toggle has no equivalent here.
 
-To use the popup in private windows, enable **Allow in Incognito** in the extension's Chrome details. Regular routing is inherited until a private-session override is set. Private routing overrides expire when the last Incognito window closes, and private usage does not enter location history. The Settings button opens regular, persistent settings. Reload-after-change uses one preference for both popup contexts; change it in regular settings. Incognito diagnostics are unavailable because a spanning service worker cannot guarantee that its requests use the private route.
+To use the popup in private windows, enable **Allow in Incognito** in the extension's Chrome details. Regular routing is inherited until a private-session override is set. Private routing overrides expire when the last Incognito window closes, and private usage does not enter location history. The Settings button opens regular, persistent settings. Reload-after-change uses one preference for both popup contexts; change it in regular settings. Favorites are shared the same way and change only in regular windows. Incognito diagnostics are unavailable because a spanning service worker cannot guarantee that its requests use the private route.
 
 Import previews identify incompatible settings before replacement. Firefox exports using unsupported DNS settings or unrecognized proxy endpoints require correction; importing them must not silently discard their routing intent.
 
