@@ -40,6 +40,7 @@ export async function requestJson(url: string): Promise<unknown> {
   try {
     const response = await fetch(url, {
       signal: controller.signal,
+      headers: { Accept: "application/json" },
       credentials: "omit",
       cache: "no-store",
       redirect: "error",

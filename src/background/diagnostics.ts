@@ -50,27 +50,26 @@ export function dns(input: unknown): DnsObservation[] {
       !object(row) ||
       !ip(row.ip) ||
       typeof row.mullvad_dns !== "boolean" ||
-      typeof row.mullvad_dns_hostname !== "string" ||
-      row.mullvad_dns_hostname.length > 256
+      (row.mullvad_dns_hostname !== undefined &&
+        (typeof row.mullvad_dns_hostname !== "string" ||
+          row.mullvad_dns_hostname.length > 256))
     )
       throw new Error("Invalid DNS response");
     return {
       ip: row.ip,
       isMullvad: row.mullvad_dns,
-      hostname: row.mullvad_dns_hostname,
+      hostname:
+        row.mullvad_dns_hostname === undefined ? "" : row.mullvad_dns_hostname,
       country: optional(row.country),
       organization: optional(row.organization),
     };
   });
 }
-async function check<T>(
-  url: string,
-  validate: (input: unknown) => T,
-): Promise<LoadState<T>> {
+async function check<T>(load: () => Promise<T>): Promise<LoadState<T>> {
   try {
     return {
       status: "ready",
-      value: validate(await requestJson(url)),
+      value: await load(),
       updatedAt: Date.now(),
     };
   } catch {
@@ -96,14 +95,25 @@ export async function runDiagnostics(
   await Promise.all(
     checks.map(async (name) => {
       if (name === "dns")
-        result.dns = await check(
-          `https://${crypto.randomUUID()}.dnsleak.am.i.mullvad.net/`,
-          dns,
-        );
+        result.dns = await check(async () => {
+          const samples = await Promise.all(
+            Array.from({ length: 6 }, async () =>
+              dns(
+                await requestJson(
+                  `https://${crypto.randomUUID()}.dnsleak.am.i.mullvad.net/`,
+                ),
+              ),
+            ),
+          );
+          return [
+            ...new Map(samples.flat().map((row) => [row.ip, row])).values(),
+          ];
+        });
       else
-        result[name] = await check(
-          `https://${name}.am.i.mullvad.net/json`,
-          connection,
+        result[name] = await check(async () =>
+          connection(
+            await requestJson(`https://${name}.am.i.mullvad.net/json`),
+          ),
         );
     }),
   );
