@@ -148,12 +148,7 @@ export class Controller {
     } else this.session = { seed: crypto.randomUUID(), pool: this.catalog() };
     const saved = await read(chrome.storage.local, STATE);
     try {
-      if (saved !== undefined)
-        this.state = validateStored(
-          saved,
-          this.catalog(),
-          this.routingCore.validateImport,
-        );
+      if (saved !== undefined) this.state = validateStored(saved);
     } catch {
       this.startupError = true;
       throw new Failure(
@@ -175,11 +170,7 @@ export class Controller {
     ) {
       this.session.privateSeed = rawSession.privateSeed as string;
       this.session.privateWindows = [...this.privateWindows];
-      this.session.privateState = validateStored(
-        rawSession.privateState,
-        this.catalog(),
-        this.routingCore.validateImport,
-      );
+      this.session.privateState = validateStored(rawSession.privateState);
     }
     await write(chrome.storage.session, SESSION, this.session);
     this.initialized = true;
@@ -609,7 +600,11 @@ export class Controller {
       case "settings.update": {
         const { enabled, randomMode, autoReload, historyEnabled } =
           command.patch;
-        if (enabled !== undefined) routing.enabled = enabled;
+        if (enabled !== undefined) {
+          routing.enabled = enabled;
+          if (enabled && routing.globalServerId === null)
+            routing.globalServerId = INTERNAL_DEFAULT_SERVER_ID;
+        }
         if (randomMode !== undefined) routing.randomMode = randomMode;
         if (autoReload !== undefined)
           next.settings.preferences.autoReload = autoReload;

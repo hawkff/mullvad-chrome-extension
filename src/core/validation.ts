@@ -104,18 +104,13 @@ function rule(value: unknown) {
     serverId: string(v.serverId),
   };
 }
-export function routing(
-  value: unknown,
-  servers: readonly Server[],
-): RoutingSettings {
+export function routing(value: unknown): RoutingSettings {
   const v = object(value);
   keys(v, ["enabled", "globalServerId", "randomMode", "rules", "exclusions"]);
   const rules = array(v.rules).map(rule);
   if (new Set(rules.map((r) => r.host)).size !== rules.length)
     throw new Error("Canonical rule collision");
-  for (const r of rules) serverId(r.serverId, servers);
-  const id =
-    v.globalServerId === null ? null : serverId(v.globalServerId, servers);
+  const id = v.globalServerId === null ? null : string(v.globalServerId);
   if (v.enabled === true && id === null)
     throw new Error("Enabled global route requires a server");
   return {
@@ -134,7 +129,7 @@ function preferences(value: unknown) {
     historyEnabled: boolean(v.historyEnabled),
   };
 }
-function history(value: unknown, servers: readonly Server[]): HistoryEntry[] {
+function history(value: unknown): HistoryEntry[] {
   const result = array(value).map((item) => {
     const v = object(item);
     keys(v, [
@@ -147,7 +142,7 @@ function history(value: unknown, servers: readonly Server[]): HistoryEntry[] {
       "lastUsedAt",
     ]);
     return {
-      serverId: serverId(v.serverId, servers),
+      serverId: string(v.serverId),
       hostname: host(v.hostname),
       country: string(v.country),
       countryCode: string(v.countryCode),
@@ -248,22 +243,31 @@ function firefoxProxy(
     );
   return { enabled, serverId: id };
 }
+// Saved intent and history outlive catalog membership; imports check availability separately.
+export function persisted(input: unknown): ImportPreview {
+  const v = object(input);
+  keys(v, ["version", "settings", "history"]);
+  if (v.version !== 1) throw new Error("Unsupported native settings version");
+  const settings = object(v.settings);
+  keys(settings, ["routing", "preferences"]);
+  return {
+    format: "native",
+    routing: routing(settings.routing),
+    preferences: preferences(settings.preferences),
+    history: history(v.history),
+  };
+}
 export function imported(
   input: unknown,
   catalog: readonly Server[],
 ): ImportPreview {
   const v = object(input);
   if (Object.hasOwn(v, "version")) {
-    keys(v, ["version", "settings", "history"]);
-    if (v.version !== 1) throw new Error("Unsupported native settings version");
-    const settings = object(v.settings);
-    keys(settings, ["routing", "preferences"]);
-    return {
-      format: "native",
-      routing: routing(settings.routing, catalog),
-      preferences: preferences(settings.preferences),
-      history: history(v.history, catalog),
-    };
+    const result = persisted(input);
+    const route = result.routing;
+    if (route.globalServerId !== null) serverId(route.globalServerId, catalog);
+    for (const rule of route.rules) serverId(rule.serverId, catalog);
+    return result;
   }
   keys(v, [
     "excludedHosts",

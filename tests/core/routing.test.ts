@@ -6,6 +6,7 @@ import {
   resolveRoute,
   validateCommand,
   validateImport,
+  validatePersistedSettings,
   validateServers,
 } from "../../src/core";
 import type { RoutingContext } from "../../src/shared/state";
@@ -423,4 +424,61 @@ test("generated PAC uses only ASCII for Chrome proxy settings", () => {
   expect(
     sandbox.FindProxyForURL?.("https://example.com", "example.com"),
   ).toContain("SOCKS5");
+});
+
+test("missing and offline routes block only their destinations in engine and PAC", () => {
+  const ctx = context();
+  ctx.settings.enabled = false;
+  ctx.settings.rules = [
+    { host: "missing.example", enabled: true, serverId: "retired-server" },
+    { host: "offline.example", enabled: true, serverId: id },
+    { host: "valid.example", enabled: true, serverId: "internal-default" },
+  ];
+  ctx.servers[0].online = false;
+  ctx.settings.exclusions = ["excluded.example"];
+  expect(resolveRoute("missing.example", ctx).kind).toBe("blocked");
+  expect(resolveRoute("offline.example", ctx).kind).toBe("blocked");
+  expect(resolveRoute("valid.example", ctx).kind).toBe("proxy");
+  check(ctx, [
+    "missing.example",
+    "offline.example",
+    "valid.example",
+    "excluded.example",
+    "unmatched.example",
+    "localhost",
+  ]);
+});
+
+test("persisted validation preserves unavailable IDs but rejects malformed state", () => {
+  const settings = {
+    routing: { ...context().settings, globalServerId: "retired-server" },
+    preferences: { autoReload: false, historyEnabled: true },
+  };
+  const saved = { version: 1, settings, history: [] };
+  expect(validatePersistedSettings(saved).ok).toBe(true);
+  expect(validateImport(saved, servers).ok).toBe(false);
+  for (const routing of [
+    { ...settings.routing, globalServerId: null },
+    { ...settings.routing, globalServerId: 42 },
+    { ...settings.routing, randomMode: "true" },
+    { ...settings.routing, extra: true },
+    { ...settings.routing, exclusions: ["bad/url"] },
+    {
+      ...settings.routing,
+      rules: [{ host: "example.org", serverId: "retired-server", enabled: 1 }],
+    },
+  ]) {
+    expect(
+      validatePersistedSettings({
+        ...saved,
+        settings: { ...settings, routing },
+      }).ok,
+    ).toBe(false);
+  }
+  expect(
+    validatePersistedSettings({
+      ...saved,
+      history: [{ serverId: "retired-server" }],
+    }).ok,
+  ).toBe(false);
 });

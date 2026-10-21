@@ -1,6 +1,8 @@
-import { beforeEach, describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, spyOn, test } from "bun:test";
+import { runInNewContext } from "node:vm";
 import type { Command } from "../../src/shared/messages";
 import type { Snapshot } from "../../src/shared/state";
+import wireServers from "../core/fixtures/servers.json";
 
 // Inject routing doubles without replacing the module used by routing tests.
 const routingCore = {
@@ -578,4 +580,209 @@ test("last private-window closure still invalidates a mutation after PAC applica
   expect(JSON.stringify(session)).not.toContain("privateState");
   expect(JSON.stringify(session)).not.toContain("privateSeed");
   expect(privateProxy).toBeUndefined();
+});
+
+// These persistence regressions deliberately use the real routing validators and PAC.
+describe("real-core persisted routing", () => {
+  function installedPac() {
+    const value = regular as {
+      pacScript: { mandatory: boolean; data: string };
+    };
+    expect(value.pacScript.mandatory).toBe(true);
+    return runInNewContext(`${value.pacScript.data};FindProxyForURL`) as (
+      url: string,
+      host: string,
+    ) => string;
+  }
+  const wire = wireServers[0];
+  const extra = {
+    ...wire,
+    hostname: "se-got-wg-socks5-002.relays.mullvad.net",
+    ipv4_address: "185.213.154.70",
+  };
+  async function refresh(
+    controller: InstanceType<typeof Controller>,
+    rows: unknown[],
+  ) {
+    const fetcher = spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(rows)),
+    );
+    try {
+      expect((await controller.client({ type: "servers.refresh" })).ok).toBe(
+        true,
+      );
+    } finally {
+      fetcher.mockRestore();
+    }
+  }
+  test("fresh enable chooses internal default and survives worker and browser restart", async () => {
+    const controller = new Controller();
+    expect(
+      (
+        await controller.client({
+          type: "settings.update",
+          patch: { enabled: true },
+        })
+      ).ok,
+    ).toBe(true);
+    for (const restartBrowser of [false, true]) {
+      if (restartBrowser) session = {};
+      const restored = await snapshot(new Controller());
+      expect(restored.settings.routing.globalServerId).toBe("internal-default");
+      expect(installedPac()("https://example.org", "example.org")).toBe(
+        "SOCKS5 10.64.0.1:1080",
+      );
+    }
+  });
+  test("retired route and history survive refresh and restart without blanket blocking", async () => {
+    const controller = new Controller();
+    await refresh(controller, [wire, extra]);
+    expect(
+      (
+        await controller.client({
+          type: "server.select",
+          serverId: wire.hostname,
+          host: "missing.example",
+        })
+      ).ok,
+    ).toBe(true);
+    expect(
+      (
+        await controller.client({
+          type: "server.select",
+          serverId: extra.hostname,
+          host: "valid.example",
+        })
+      ).ok,
+    ).toBe(true);
+    await refresh(controller, [extra]);
+    session = {};
+    const restarted = new Controller();
+    const restored = await snapshot(restarted);
+    expect(restored.settings.routing.rules).toHaveLength(2);
+    expect(restored.history.map((row) => row.serverId)).toContain(
+      wire.hostname,
+    );
+    const pac = installedPac();
+    expect(() => pac("https://missing.example", "missing.example")).toThrow(
+      /Missing/,
+    );
+    expect(pac("https://valid.example", "valid.example")).toBe(
+      "SOCKS5 185.213.154.70:1080",
+    );
+    expect(pac("https://other.example", "other.example")).toBe("DIRECT");
+    expect(pac("http://localhost", "localhost")).toBe("DIRECT");
+    expect((await restarted.client({ type: "history.clear" })).ok).toBe(true);
+    expect(
+      (
+        await restarted.client({
+          type: "server.select",
+          serverId: extra.hostname,
+        })
+      ).ok,
+    ).toBe(true);
+  });
+  test("history-only retired IDs and missing cache do not prevent recovery", async () => {
+    const controller = new Controller();
+    await refresh(controller, [wire]);
+    await controller.client({ type: "server.select", serverId: wire.hostname });
+    await controller.client({
+      type: "server.select",
+      serverId: "internal-default",
+    });
+    await refresh(controller, []);
+    expect((await snapshot(new Controller())).history[0].serverId).toBe(
+      wire.hostname,
+    );
+    delete local["servers.v1"];
+    session = {};
+    const restarted = new Controller();
+    expect((await snapshot(restarted)).history[0].serverId).toBe(wire.hostname);
+    expect(installedPac()("https://example.org", "example.org")).toBe(
+      "SOCKS5 10.64.0.1:1080",
+    );
+    expect((await restarted.client({ type: "history.clear" })).ok).toBe(true);
+  });
+  test("active route without cache remains unresolved and can be reselected", async () => {
+    const controller = new Controller();
+    await refresh(controller, [wire]);
+    await controller.client({ type: "server.select", serverId: wire.hostname });
+    delete local["servers.v1"];
+    session = {};
+    const restarted = new Controller();
+    expect((await snapshot(restarted)).settings.routing.globalServerId).toBe(
+      wire.hostname,
+    );
+    expect(() => installedPac()("https://example.org", "example.org")).toThrow(
+      /Missing/,
+    );
+    expect(
+      (
+        await restarted.client({
+          type: "server.select",
+          serverId: "internal-default",
+        })
+      ).ok,
+    ).toBe(true);
+  });
+  test("catalog growth and new selections do not change frozen random assignments", async () => {
+    const controller = new Controller();
+    await refresh(controller, [wire]);
+    await controller.client({
+      type: "settings.update",
+      patch: { randomMode: true },
+    });
+    const before = installedPac()("https://example.org", "example.org");
+    await refresh(controller, [wire, extra]);
+    expect(
+      (
+        await controller.client({
+          type: "server.select",
+          serverId: extra.hostname,
+        })
+      ).ok,
+    ).toBe(true);
+    expect(
+      (
+        await controller.client({
+          type: "server.select",
+          serverId: extra.hostname,
+          host: "site.example",
+        })
+      ).ok,
+    ).toBe(true);
+    await snapshot(new Controller());
+    expect(installedPac()("https://example.org", "example.org")).toBe(before);
+    expect(installedPac()("https://site.example", "site.example")).toBe(before);
+    expect(before).toBe("SOCKS5 185.213.154.69:1080");
+  });
+  test("invalid imports cannot mutate proxy or storage", async () => {
+    const controller = new Controller();
+    const state = await snapshot(controller);
+    for (const routing of [
+      { ...state.settings.routing, enabled: true },
+      { ...state.settings.routing, enabled: true, globalServerId: "unknown" },
+      {
+        ...state.settings.routing,
+        rules: [
+          { host: "bad/url", enabled: true, serverId: "internal-default" },
+        ],
+      },
+    ]) {
+      const before = structuredClone({ local, session, regular, writes });
+      expect(
+        (
+          await controller.client({
+            type: "settings.import",
+            data: {
+              version: 1,
+              settings: { ...state.settings, routing },
+              history: [],
+            },
+          })
+        ).ok,
+      ).toBe(false);
+      expect({ local, session, regular, writes }).toEqual(before);
+    }
+  });
 });

@@ -1,4 +1,4 @@
-import { validateImport } from "../core/index";
+import { validatePersistedSettings } from "../core/index";
 import type { HistoryEntry, Server, Settings } from "../shared/state";
 import { callback, object, voidCallback } from "./platform";
 export interface Stored {
@@ -31,11 +31,7 @@ export function defaults(): Stored {
     history: [],
   };
 }
-export function validateStored(
-  input: unknown,
-  servers: Server[],
-  validate = validateImport,
-): Stored {
+export function validateStored(input: unknown): Stored {
   if (
     !object(input) ||
     input.version !== 1 ||
@@ -46,10 +42,11 @@ export function validateStored(
     throw new Error(
       "Invalid saved settings; export/recover storage before resetting it.",
     );
-  const result = validate(
-    { version: 1, settings: input.settings, history: input.history },
-    servers,
-  );
+  const result = validatePersistedSettings({
+    version: 1,
+    settings: input.settings,
+    history: input.history,
+  });
   if (!result.ok || !result.value.preferences || !result.value.history)
     throw new Error("Invalid saved settings; no data was overwritten.");
   return {

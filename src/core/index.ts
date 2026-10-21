@@ -13,6 +13,7 @@ import {
   command,
   host,
   imported,
+  persisted,
   routing,
   servers,
 } from "./validation";
@@ -24,14 +25,14 @@ export function resolveRoute(
   host: string,
   context: RoutingContext,
 ): RouteDecision {
-  const valid = checked(() => routing(context.settings, context.servers));
+  const valid = checked(() => routing(context.settings));
   if (!valid.ok) return { kind: "blocked", reason: valid.error };
   const canonical = canonicalHost(host);
   if (!canonical.ok) return { kind: "blocked", reason: canonical.error };
   return engine.route(canonical.value, { ...context, settings: valid.value });
 }
 export function generatePac(context: RoutingContext): string {
-  const valid = checked(() => routing(context.settings, context.servers));
+  const valid = checked(() => routing(context.settings));
   // Services must apply this PAC with mandatory:true so runtime errors cannot fall back to DIRECT.
   if (!valid.ok)
     return 'function FindProxyForURL(){throw new Error("Invalid routing configuration");}';
@@ -57,4 +58,10 @@ export function validateImport(
 }
 export function validateCommand(input: unknown): ValidationResult<Command> {
   return checked(() => command(input));
+}
+
+export function validatePersistedSettings(
+  input: unknown,
+): ValidationResult<ImportPreview> {
+  return checked(() => persisted(input));
 }
