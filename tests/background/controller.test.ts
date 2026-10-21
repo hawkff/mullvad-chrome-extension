@@ -429,3 +429,53 @@ test("privacy denial does not claim an override", async () => {
   expect(rtc).toBe("default");
   expect((await snapshot(controller)).privacy.permissionGranted).toBe(false);
 });
+
+test("contextless proxy errors cannot expose private activity or alter mandatory routing", async () => {
+  const listeners: ((details: {
+    fatal: boolean;
+    error: string;
+    details: string;
+  }) => void)[] = [];
+  const event = () => ({ addListener: () => undefined });
+  Object.assign(chrome.runtime, {
+    onMessage: event(),
+    onInstalled: event(),
+    onStartup: event(),
+  });
+  Object.assign(chrome.permissions, { onRemoved: event() });
+  Object.assign(chrome.windows, { onRemoved: event(), onCreated: event() });
+  Object.assign(chrome.proxy.settings, { onChange: event() });
+  Object.assign(chrome.proxy, {
+    onProxyError: {
+      addListener: (listener: (typeof listeners)[number]) =>
+        listeners.push(listener),
+    },
+  });
+  Object.assign(globalThis, { __DEV__: false });
+  await import("../../src/background/index");
+  const controller = new Controller(routingCore);
+  await controller.client({
+    type: "server.select",
+    serverId: "internal-default",
+    context: "incognito",
+  });
+  const before = await snapshot(controller);
+  const beforePrivate = structuredClone(privateProxy);
+  const beforeStorage = structuredClone({ local, session });
+  // Chrome does not attribute this event to a browser context. There must be no
+  // global error listener that exposes it to regular UI or clears mandatory PAC.
+  for (const listener of listeners)
+    listener({
+      fatal: true,
+      error: "ERR_PAC_SCRIPT_FAILED",
+      details: "private.example",
+    });
+  const after = await snapshot(controller);
+  expect(listeners).toHaveLength(0);
+  expect(after).toEqual(before);
+  expect(privateProxy).toEqual(beforePrivate);
+  expect({ local, session }).toEqual(beforeStorage);
+  expect(
+    (privateProxy as { pacScript: { mandatory: boolean } }).pacScript.mandatory,
+  ).toBe(true);
+});
