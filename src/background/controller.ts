@@ -186,8 +186,6 @@ export class Controller {
     if (!this.startupError) {
       // Chrome retains PAC across worker suspension; reconcile only validated state.
       await this.reconcile(this.state, "regular", false);
-      if (this.session.privateState)
-        await this.reconcile(this.session.privateState, "incognito", false);
     }
   }
   private catalog(): Server[] {
@@ -424,7 +422,19 @@ export class Controller {
         ? (this.session.privateState ?? this.state)
         : this.state;
     const proxy = await this.effective("regular");
-    const incognitoProxy = await this.effective("incognito");
+    const incognitoProxy: ProxyStatus =
+      context === "incognito"
+        ? await this.effective("incognito")
+        : {
+            scope: "incognito",
+            settingScope: "unknown",
+            ownership: "unknown",
+            permissionGranted: false,
+            applied: false,
+            status: "unknown",
+            message:
+              "Private proxy settings are not inspected from regular windows.",
+          };
     await Promise.all([
       voidCallback((done) =>
         chrome.action.setBadgeText(
@@ -850,13 +860,28 @@ export class Controller {
       .catch(() => undefined);
   }
   privateWindowChanged(windowId?: number): void {
-    if (windowId !== undefined) this.privateWindows.delete(windowId);
-    const ended = windowId !== undefined && this.privateWindows.size === 0;
-    this.privateEpoch++;
+    const removedPrivate =
+      windowId !== undefined && this.privateWindows.delete(windowId);
+    const ended = removedPrivate && this.privateWindows.size === 0;
+    if (ended) this.privateEpoch++;
+    // Permission events may concern unrelated permissions, not Incognito opt-in.
+    const permission =
+      windowId === undefined
+        ? this.allowed().then((allowed) => {
+            if (!allowed) this.privateEpoch++;
+            return allowed;
+          })
+        : Promise.resolve(true);
     this.tail = this.tail
       .catch(() => undefined)
       .then(async () => {
-        if (!ended && (await this.allowed()) && (await this.privateOpen())) {
+        const permitted = await permission;
+        if (
+          !ended &&
+          permitted &&
+          (await this.allowed()) &&
+          (await this.privateOpen())
+        ) {
           if (this.session.privateState) {
             this.session.privateWindows = [...this.privateWindows];
             await write(chrome.storage.session, SESSION, this.session);
@@ -870,7 +895,11 @@ export class Controller {
           await write(chrome.storage.session, SESSION, this.session);
         // Chrome expires the private PAC at last-window close; also remove a stale
         // in-flight override if a new private session opened before this queue ran.
-        if (ended && (await this.allowed()) && (await this.privateOpen())) {
+        if (
+          (ended || !permitted) &&
+          (await this.allowed()) &&
+          (await this.privateOpen())
+        ) {
           const setting = await callback<
             chrome.types.ChromeSettingGetResult<unknown>
           >((done) => chrome.proxy.settings.get({ incognito: true }, done));

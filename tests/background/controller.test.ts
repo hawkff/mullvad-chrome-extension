@@ -54,6 +54,7 @@ let session: Record<string, unknown>;
 let regular: unknown;
 let privateProxy: unknown;
 let owner: string;
+let privateOwner: string | undefined;
 let optedIn: boolean;
 let privateWindow: boolean;
 let proxyPermission: boolean;
@@ -62,6 +63,8 @@ let failStorage: boolean;
 let writes: number;
 let rtc: unknown;
 let rtcOwner: string;
+let onProxySet: (() => void) | undefined;
+let privateQueries: number;
 function area(data: () => Record<string, unknown>, persistent: boolean) {
   return {
     get: (key: string, done: (value: unknown) => void) =>
@@ -86,6 +89,7 @@ beforeEach(() => {
   session = {};
   regular = { mode: "system" };
   privateProxy = undefined;
+  privateOwner = undefined;
   owner = "controllable_by_this_extension";
   optedIn = true;
   privateWindow = true;
@@ -93,6 +97,8 @@ beforeEach(() => {
   privacyPermission = true;
   failStorage = false;
   writes = 0;
+  onProxySet = undefined;
+  privateQueries = 0;
   rtc = "default";
   rtcOwner = "controllable_by_this_extension";
   Object.assign(globalThis, {
@@ -131,25 +137,41 @@ beforeEach(() => {
           get: (
             { incognito }: { incognito: boolean },
             done: (value: unknown) => void,
-          ) =>
+          ) => {
+            if (incognito) privateQueries++;
             done({
               value: incognito ? (privateProxy ?? regular) : regular,
-              levelOfControl: owner,
+              levelOfControl:
+                incognito && privateProxy !== undefined
+                  ? (privateOwner ?? owner)
+                  : owner,
               incognitoSpecific: incognito && privateProxy !== undefined,
-            }),
+            });
+          },
           set: (
             { value, scope }: { value: unknown; scope: string },
             done: () => void,
           ) => {
-            if (scope === "regular") regular = value;
-            else privateProxy = value;
-            owner = "controlled_by_this_extension";
+            if (scope === "regular") {
+              regular = value;
+              owner = "controlled_by_this_extension";
+            } else {
+              privateProxy = value;
+              privateOwner = "controlled_by_this_extension";
+            }
+            const hook = onProxySet;
+            onProxySet = undefined;
+            hook?.();
             done();
           },
           clear: ({ scope }: { scope: string }, done: () => void) => {
-            if (scope === "regular") regular = { mode: "system" };
-            else privateProxy = undefined;
-            owner = "controllable_by_this_extension";
+            if (scope === "regular") {
+              regular = { mode: "system" };
+              owner = "controllable_by_this_extension";
+            } else {
+              privateProxy = undefined;
+              privateOwner = undefined;
+            }
             done();
           },
         },
@@ -232,8 +254,10 @@ describe("validated serialized controller", () => {
     const state = await snapshot(controller);
     expect(state.proxy.applied).toBe(true);
     expect(state.proxy.settingScope).toBe("regular");
-    expect(state.incognitoProxy.applied).toBe(true);
-    expect(state.incognitoProxy.settingScope).toBe("regular");
+    expect(state.incognitoProxy.status).toBe("unknown");
+    const privateState = await snapshot(controller, "incognito");
+    expect(privateState.incognitoProxy.applied).toBe(true);
+    expect(privateState.incognitoProxy.settingScope).toBe("regular");
   });
   test("other owners and revoked permission cannot overwrite routes", async () => {
     owner = "controlled_by_other_extensions";
@@ -478,4 +502,80 @@ test("contextless proxy errors cannot expose private activity or alter mandatory
   expect(
     (privateProxy as { pacScript: { mandatory: boolean } }).pacScript.mandatory,
   ).toBe(true);
+});
+
+test("regular snapshots never inspect or reveal private override changes", async () => {
+  const controller = new Controller(routingCore);
+  await controller.client({
+    type: "server.select",
+    serverId: "internal-default",
+  });
+  let queries = privateQueries;
+  const before = await snapshot(controller);
+  expect(privateQueries).toBe(queries);
+  await controller.client({
+    type: "settings.update",
+    patch: { enabled: false },
+    context: "incognito",
+  });
+  queries = privateQueries;
+  const after = await snapshot(controller);
+  expect(privateQueries).toBe(queries);
+  expect(after).toEqual(before);
+  expect(after.incognitoProxy.status).toBe("unknown");
+  privateProxy = {
+    mode: "pac_script",
+    pacScript: { data: "broken", mandatory: true },
+  };
+  const afterPrivateError = await snapshot(controller);
+  expect(afterPrivateError).toEqual(before);
+  expect(privateQueries).toBe(queries);
+  await snapshot(new Controller(routingCore));
+  expect(privateQueries).toBe(queries);
+});
+
+for (const closedWindow of [7, 99]) {
+  test(`closing ${closedWindow === 7 ? "one of two private windows" : "an unrelated regular window"} during a private mutation preserves the session`, async () => {
+    const controller = new Controller(routingCore);
+    await snapshot(controller);
+    controller.privateWindowCreated({
+      id: 8,
+      incognito: true,
+    } as chrome.windows.Window);
+    await snapshot(controller);
+    onProxySet = () => controller.privateWindowChanged(closedWindow);
+    const result = await controller.client({
+      type: "server.select",
+      serverId: "internal-default",
+      context: "incognito",
+    });
+    expect(result.ok).toBe(true);
+    const privateState = await snapshot(controller, "incognito");
+    expect(privateState.revision).toBe(1);
+    expect(privateState.incognitoProxy.applied).toBe(true);
+    expect(privateState.settings.routing.globalServerId).toBe(
+      "internal-default",
+    );
+    expect(JSON.stringify(session)).toContain("privateState");
+  });
+}
+
+test("last private-window closure still invalidates a mutation after PAC application", async () => {
+  const controller = new Controller(routingCore);
+  await snapshot(controller);
+  onProxySet = () => {
+    privateWindow = false;
+    privateProxy = undefined;
+    controller.privateWindowChanged(7);
+  };
+  const result = await controller.client({
+    type: "server.select",
+    serverId: "internal-default",
+    context: "incognito",
+  });
+  expect(result.ok).toBe(false);
+  await snapshot(controller);
+  expect(JSON.stringify(session)).not.toContain("privateState");
+  expect(JSON.stringify(session)).not.toContain("privateSeed");
+  expect(privateProxy).toBeUndefined();
 });
