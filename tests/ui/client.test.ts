@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  currentWebsiteTab,
   freshness,
   incognitoScopeDescription,
   isImportPreview,
@@ -146,6 +147,76 @@ test("window context resolves before UI mount and never defaults on failure", as
       },
     });
     await expect(resolveUiContext()).rejects.toThrow("Cannot determine");
+  } finally {
+    if (previous) Object.defineProperty(globalThis, "chrome", previous);
+    else Reflect.deleteProperty(globalThis, "chrome");
+  }
+});
+
+test("active website lookup uses its hosting window and rejects stale/unsafe targets", async () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "chrome");
+  let allowed = true;
+  let window = { id: 7, incognito: false };
+  let tab = {
+    id: 4,
+    windowId: 7,
+    active: true,
+    incognito: false,
+    url: "https://example.com",
+  };
+  try {
+    Object.defineProperty(globalThis, "chrome", {
+      configurable: true,
+      value: {
+        permissions: { contains: async () => allowed },
+        runtime: {},
+        windows: {
+          getCurrent: (_options: object, done: (window: object) => void) =>
+            done(window),
+        },
+        tabs: {
+          query: async (query: object) => {
+            expect(query).toEqual({ active: true, windowId: 7 });
+            return [{ id: 4 }];
+          },
+          get: async (id: number) => {
+            expect(id).toBe(4);
+            return tab;
+          },
+        },
+      },
+    });
+    expect((await currentWebsiteTab("regular")).id).toBe(4);
+    for (const patch of [
+      { active: false },
+      { windowId: 8 },
+      { incognito: true },
+      { id: 5 },
+      { url: "chrome-extension://test/options.html" },
+      { url: "about:blank" },
+    ]) {
+      tab = {
+        id: 4,
+        windowId: 7,
+        active: true,
+        incognito: false,
+        url: "https://example.com",
+        ...patch,
+      };
+      await expect(currentWebsiteTab("regular")).rejects.toThrow();
+    }
+    tab = {
+      id: 4,
+      windowId: 7,
+      active: true,
+      incognito: true,
+      url: "https://example.com",
+    };
+    window = { id: 7, incognito: true };
+    expect((await currentWebsiteTab("incognito")).id).toBe(4);
+    await expect(currentWebsiteTab("regular")).rejects.toThrow("context");
+    allowed = false;
+    await expect(currentWebsiteTab("incognito")).rejects.toThrow("Tab access");
   } finally {
     if (previous) Object.defineProperty(globalThis, "chrome", previous);
     else Reflect.deleteProperty(globalThis, "chrome");

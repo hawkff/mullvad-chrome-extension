@@ -11,6 +11,7 @@ import {
 } from "../shared/state";
 import {
   client,
+  currentWebsiteTab,
   freshness,
   incognitoScopeDescription,
   searchServers,
@@ -73,7 +74,6 @@ export function App({ context }: { context: BrowserContext }) {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [host, setHost] = useState("");
-  const [tabId, setTabId] = useState<number>();
   const [target, setTarget] = useState<"global" | "site">("global");
   const [picker, setPicker] = useState(false);
   const [query, setQuery] = useState("");
@@ -121,16 +121,13 @@ export function App({ context }: { context: BrowserContext }) {
             ? "Checks finished. Review the observations below."
             : "Settings updated.",
       );
-      if (
-        reload &&
-        value.settings.preferences.autoReload &&
-        tabId !== undefined
-      ) {
+      if (reload && value.settings.preferences.autoReload && !isOptions) {
         try {
-          await chrome.tabs.reload(tabId);
-        } catch {
+          const tab = await currentWebsiteTab(context);
+          await chrome.tabs.reload(tab.id);
+        } catch (error) {
           setError(
-            "Settings saved, but Chrome could not reload the tab. Reload it manually.",
+            `Settings saved, but the active website was not reloaded. ${error instanceof Error ? error.message : "Reload it manually."}`,
           );
         }
       }
@@ -168,21 +165,32 @@ export function App({ context }: { context: BrowserContext }) {
         throw new Error(
           "Chrome denied tab access. Allow it to use the active website.",
         );
-      const [tab] = await chrome.tabs.query({
-        active: true,
-        currentWindow: true,
-      });
-      if (!tab?.url || tab.incognito !== (context === "incognito"))
-        throw new Error("No active website in this browsing context.");
+      const tab = await currentWebsiteTab(context);
       const url = new URL(tab.url);
-      if (!["http:", "https:"].includes(url.protocol))
-        throw new Error("Open an HTTP or HTTPS website first.");
       setHost(url.hostname.toLowerCase().replace(/\.$/, ""));
-      setTabId(tab.id);
       setTarget("site");
     } catch (e) {
       setError(
         e instanceof Error ? e.message : "Cannot read the current website.",
+      );
+    }
+  }
+  async function setAutoReload(enabled: boolean) {
+    setError("");
+    try {
+      if (
+        enabled &&
+        !(await chrome.permissions.request({ permissions: ["tabs"] }))
+      )
+        throw new Error(
+          "Chrome denied tab access. Active-website reload was not enabled.",
+        );
+      await mutate({ type: "settings.update", patch: { autoReload: enabled } });
+    } catch (error) {
+      setError(
+        error instanceof Error
+          ? error.message
+          : "Cannot enable active-website reload.",
       );
     }
   }
@@ -452,10 +460,7 @@ export function App({ context }: { context: BrowserContext }) {
                           autoCapitalize="none"
                           spellCheck={false}
                           value={host}
-                          onChange={(event) => {
-                            setHost(event.target.value);
-                            setTabId(undefined);
-                          }}
+                          onChange={(event) => setHost(event.target.value)}
                         />
                         <p className="hint">
                           Enter a domain without a URL or port. A registrable
@@ -974,16 +979,15 @@ export function App({ context }: { context: BrowserContext }) {
                     <input
                       type="checkbox"
                       checked={snapshot.settings.preferences.autoReload}
-                      onChange={(e) =>
-                        mutate({
-                          type: "settings.update",
-                          patch: { autoReload: e.target.checked },
-                        })
-                      }
+                      onChange={(e) => setAutoReload(e.target.checked)}
                     />
-                    Reload the active website after routing changes
+                    Reload the active website after popup routing changes
                   </label>
                 </fieldset>
+                <p className="hint">
+                  Reloads only the active HTTP or HTTPS website in the popup's
+                  window. Options changes never reload a website.
+                </p>
                 <p>
                   Incognito access:{" "}
                   {snapshot.incognitoAllowed

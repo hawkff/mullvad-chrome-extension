@@ -173,6 +173,22 @@ test("App browser workflows, responsive layout and keyboard focus", async () => 
         "document.body.textContent.includes('PRIVATE_STATUS_NOT_INSPECTED')",
       ),
     ).toBe(false);
+    expect(
+      await evaluate(
+        "Array.from(document.querySelectorAll('button')).some(b=>b.textContent.trim()==='Use active website')",
+      ),
+    ).toBe(false);
+    await evaluate(
+      "Array.from(document.querySelectorAll('label')).find(l=>l.textContent.includes('Reload the active website')).querySelector('input').click()",
+    );
+    await wait(
+      "document.querySelector('[role=alert]')?.textContent.includes('denied tab access')",
+    );
+    expect(
+      await evaluate(
+        "Array.from(document.querySelectorAll('label')).find(l=>l.textContent.includes('Reload the active website')).querySelector('input').checked",
+      ),
+    ).toBe(false);
     await cdp("Page.navigate", { url: `${server.url}options.html?incognito` });
     await wait("document.body.textContent.includes('Incognito window')");
     await wait("document.body.textContent.includes('Browser proxy')");

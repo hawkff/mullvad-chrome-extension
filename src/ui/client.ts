@@ -1,5 +1,10 @@
 import type { Command, CommandResult, Response } from "../shared/messages";
-import type { LoadState, ProxyStatus, Server } from "../shared/state";
+import type {
+  BrowserContext,
+  LoadState,
+  ProxyStatus,
+  Server,
+} from "../shared/state";
 
 type Check = (value: unknown) => boolean;
 const text: Check = (v) => typeof v === "string";
@@ -244,4 +249,42 @@ export function resolveUiContext(): Promise<"regular" | "incognito"> {
       resolve(window.incognito ? "incognito" : "regular");
     });
   });
+}
+
+export async function currentWebsiteTab(
+  context: BrowserContext,
+): Promise<{ id: number; url: string }> {
+  if (!(await chrome.permissions.contains({ permissions: ["tabs"] })))
+    throw new Error(
+      "Tab access is unavailable. Enable active-website reload again in regular settings to grant access, or reload manually.",
+    );
+  const window = await new Promise<chrome.windows.Window>((resolve, reject) => {
+    chrome.windows.getCurrent({}, (value) => {
+      if (chrome.runtime.lastError)
+        reject(new Error("Cannot read this browsing window."));
+      else resolve(value);
+    });
+  });
+  if (
+    typeof window.id !== "number" ||
+    window.incognito !== (context === "incognito")
+  )
+    throw new Error("No active website in this browsing context.");
+  const [selected] = await chrome.tabs.query({
+    active: true,
+    windowId: window.id,
+  });
+  if (selected?.id === undefined)
+    throw new Error("No active website in this window.");
+  const tab = await chrome.tabs.get(selected.id);
+  if (
+    tab.id !== selected.id ||
+    !tab.active ||
+    tab.windowId !== window.id ||
+    tab.incognito !== window.incognito
+  )
+    throw new Error("The active website changed. Reload it manually.");
+  if (!tab.url || !["http:", "https:"].includes(new URL(tab.url).protocol))
+    throw new Error("Open an HTTP or HTTPS website first.");
+  return { id: selected.id, url: tab.url };
 }

@@ -924,6 +924,7 @@ test("actual optional permission grants and revocation", async () => {
   reader.releaseLock();
   const display = `:${new TextDecoder().decode(first.value).trim()}`;
   let chrome;
+  let reloadServer;
   try {
     chrome = await launch(resolve("dist/development"), [], display);
     const worker = await waitFor(
@@ -988,6 +989,116 @@ test("actual optional permission grants and revocation", async () => {
         })
       ).ok,
     ).toBe(true);
+    let reloadHits = 0;
+    reloadServer = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        if (new URL(request.url).pathname === "/reload") reloadHits++;
+        return new Response("reload target", {
+          headers: { "Cache-Control": "no-store" },
+        });
+      },
+    });
+    expect(
+      await evaluate(
+        page,
+        "Array.from(document.querySelectorAll('button')).some(b=>b.textContent.trim()==='Use active website')",
+      ),
+    ).toBe(false);
+    await evaluate(
+      page,
+      "Array.from(document.querySelectorAll('label')).find(l=>l.textContent.includes('Reload the active website')).querySelector('input').click()",
+    );
+    await waitFor(
+      async () =>
+        (await message(page, { type: "snapshot" })).value.settings.preferences
+          .autoReload,
+      "auto-reload preference enabled with granted tabs access",
+    );
+    const reloadUrl = new URL("reload", reloadServer.url).href;
+    const liveTab = await evaluate(
+      page,
+      `chrome.tabs.create({url:${JSON.stringify(reloadUrl)},active:true})`,
+    );
+    await waitFor(() => reloadHits === 1, "initial controlled website load");
+    const oldTargets = new Set(
+      (await chrome.targets()).map((target) => target.id),
+    );
+    await evaluate(
+      page,
+      `chrome.action.openPopup({windowId:${liveTab.windowId}})`,
+    );
+    const popupTarget = await waitFor(
+      async () =>
+        (await chrome.targets()).find(
+          (target) =>
+            target.url.endsWith("/popup.html") && !oldTargets.has(target.id),
+        ),
+      "fresh auto-reload popup",
+    );
+    const popup = await chrome.attach(popupTarget.id);
+    await waitFor(
+      () =>
+        evaluate(
+          popup,
+          "Boolean(document.querySelector('input[type=checkbox]')) && !document.querySelector('input[type=checkbox]').disabled",
+        ),
+      "fresh popup ready",
+    );
+    // No Use active website action: a global change must independently find the current website.
+    await evaluate(
+      popup,
+      "document.querySelector('input[type=checkbox]').click()",
+    );
+    await waitFor(() => reloadHits === 2, "fresh-popup global change reload");
+    expect(reloadHits).toBe(2);
+    await evaluate(
+      page,
+      `chrome.tabs.update(${liveTab.id},{url:'about:blank'})`,
+    );
+    await Bun.sleep(200);
+    await evaluate(
+      popup,
+      "document.querySelector('input[type=checkbox]').click()",
+    );
+    await waitFor(
+      () =>
+        evaluate(
+          popup,
+          "document.querySelector('[role=alert]')?.textContent.includes('HTTP or HTTPS')",
+        ),
+      "no valid website reload target",
+    );
+    expect(reloadHits).toBe(2);
+    await chrome.browser("Target.closeTarget", { targetId: popupTarget.id });
+    // Even with a valid active website, options changes must not reload it.
+    await evaluate(
+      page,
+      `chrome.tabs.update(${liveTab.id},{url:${JSON.stringify(reloadUrl)}})`,
+    );
+    await waitFor(() => reloadHits === 3, "new current website load");
+    await evaluate(
+      page,
+      "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='Refresh status').click()",
+    );
+    await waitFor(
+      () =>
+        evaluate(page, "document.body.innerText.includes('Status refreshed.')"),
+      "options refreshed",
+    );
+    await evaluate(
+      page,
+      "document.querySelector('input[type=checkbox]').click()",
+    );
+    await waitFor(
+      async () =>
+        (await message(page, { type: "snapshot" })).value.settings.routing
+          .enabled,
+      "options global change saved",
+    );
+    await Bun.sleep(200);
+    expect(reloadHits).toBe(3);
     expect(
       await evaluate(
         page,
@@ -1000,6 +1111,54 @@ test("actual optional permission grants and revocation", async () => {
         "chrome.permissions.contains({permissions:['privacy','tabs']})",
       ),
     ).toBe(false);
+    const revokedTargets = new Set(
+      (await chrome.targets()).map((target) => target.id),
+    );
+    await evaluate(
+      page,
+      `chrome.action.openPopup({windowId:${liveTab.windowId}})`,
+    );
+    const revokedTarget = await waitFor(
+      async () =>
+        (await chrome.targets()).find(
+          (target) =>
+            target.url.endsWith("/popup.html") &&
+            !revokedTargets.has(target.id),
+        ),
+      "popup after tab permission revocation",
+    );
+    const revokedPopup = await chrome.attach(revokedTarget.id);
+    await waitFor(
+      () =>
+        evaluate(
+          revokedPopup,
+          "Boolean(document.querySelector('input[type=checkbox]'))",
+        ),
+      "revoked-permission popup ready",
+    );
+    await evaluate(
+      revokedPopup,
+      "document.querySelector('input[type=checkbox]').click()",
+    );
+    await waitFor(
+      () =>
+        evaluate(
+          revokedPopup,
+          "document.querySelector('[role=alert]')?.textContent.includes('Tab access is unavailable')",
+        ),
+      "visible revoked-permission reload failure",
+    );
+    expect(reloadHits).toBe(3);
+    if (Bun.env.BROWSER_EVIDENCE_DIR) {
+      await mkdir(Bun.env.BROWSER_EVIDENCE_DIR, { recursive: true });
+      const image = await revokedPopup("Page.captureScreenshot", {
+        format: "png",
+      });
+      await writeFile(
+        join(Bun.env.BROWSER_EVIDENCE_DIR, "autoreload-permission-error.png"),
+        Buffer.from(image.data, "base64"),
+      );
+    }
     expect(
       (
         await message(page, {
@@ -1011,6 +1170,7 @@ test("actual optional permission grants and revocation", async () => {
     ).toBe(false);
   } finally {
     if (chrome) await chrome.close();
+    reloadServer?.stop(true);
     xvfb.kill();
     await xvfb.exited;
   }
