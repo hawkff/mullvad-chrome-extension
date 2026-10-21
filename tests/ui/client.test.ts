@@ -4,6 +4,7 @@ import {
   incognitoScopeDescription,
   isImportPreview,
   isSnapshot,
+  resolveUiContext,
   searchServers,
   validateResponse,
 } from "../../src/ui/client";
@@ -114,4 +115,39 @@ test("Incognito scope labels distinguish inheritance, overrides and unknown stat
       settingScope: "regular",
     }),
   ).not.toContain("Inherited");
+});
+
+test("window context resolves before UI mount and never defaults on failure", async () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "chrome");
+  try {
+    for (const incognito of [true, false]) {
+      Object.defineProperty(globalThis, "chrome", {
+        configurable: true,
+        value: {
+          windows: {
+            getCurrent: (_options: object, done: (window: object) => void) =>
+              done({ incognito }),
+          },
+          runtime: {},
+        },
+      });
+      expect(await resolveUiContext()).toBe(
+        incognito ? "incognito" : "regular",
+      );
+    }
+    Object.defineProperty(globalThis, "chrome", {
+      configurable: true,
+      value: {
+        windows: {
+          getCurrent: (_options: object, done: (window: object) => void) =>
+            done({}),
+        },
+        runtime: { lastError: { message: "unavailable" } },
+      },
+    });
+    await expect(resolveUiContext()).rejects.toThrow("Cannot determine");
+  } finally {
+    if (previous) Object.defineProperty(globalThis, "chrome", previous);
+    else Reflect.deleteProperty(globalThis, "chrome");
+  }
 });

@@ -83,6 +83,8 @@ if (!root) throw new Error("Missing test root");
 createRoot(root).render(
   <>
     <p>Test-only preview with mocked Chrome services</p>
-    <App />
+    <App
+      context={chrome.extension.inIncognitoContext ? "incognito" : "regular"}
+    />
   </>,
 );

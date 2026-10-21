@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Command, CommandResult } from "../shared/messages";
 import {
+  type BrowserContext,
   type ConnectionObservation,
   type DnsObservation,
   type ImportPreview,
@@ -16,7 +17,6 @@ import {
 } from "./client";
 
 const isOptions = location.pathname.endsWith("options.html");
-const context = chrome.extension.inIncognitoContext ? "incognito" : "regular";
 
 function Observation({
   title,
@@ -67,7 +67,7 @@ function Observation({
   );
 }
 
-export function App() {
+export function App({ context }: { context: BrowserContext }) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -158,7 +158,7 @@ export function App() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [context]);
 
   async function activeSite() {
     setError("");
@@ -277,9 +277,14 @@ export function App() {
           <button
             type="button"
             className="text"
+            title={
+              context === "incognito"
+                ? "Opens regular, persistent settings"
+                : undefined
+            }
             onClick={() => chrome.runtime.openOptionsPage()}
           >
-            Settings
+            {context === "incognito" ? "Regular settings" : "Settings"}
           </button>
         ) : null}
       </header>

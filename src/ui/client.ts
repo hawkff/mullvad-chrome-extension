@@ -229,3 +229,19 @@ export function incognitoScopeDescription(proxy: ProxyStatus): string {
       return "Chrome has not confirmed whether private routing inherits regular settings or uses an override.";
   }
 }
+
+export function resolveUiContext(): Promise<"regular" | "incognito"> {
+  return new Promise((resolve, reject) => {
+    chrome.windows.getCurrent({}, (window) => {
+      if (chrome.runtime.lastError || typeof window?.incognito !== "boolean") {
+        reject(
+          new Error(
+            "Cannot determine this window's browsing context. Close and reopen this page.",
+          ),
+        );
+        return;
+      }
+      resolve(window.incognito ? "incognito" : "regular");
+    });
+  });
+}

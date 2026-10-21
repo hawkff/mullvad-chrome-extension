@@ -23,6 +23,10 @@
 body {
   margin: 0;
 }
+/* Set the native action popup width before viewport-relative content can shrink it. */
+.popup-page {
+  width: 384px;
+}
 button,
 input,
 textarea {

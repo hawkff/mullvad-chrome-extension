@@ -13,7 +13,7 @@ jobs:
       - name: Install runtime prerequisites
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates chromium git unzip
+          apt-get install -y --no-install-recommends ca-certificates chromium git unzip xvfb xdotool
           chromium --version
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
