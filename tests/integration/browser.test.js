@@ -172,6 +172,15 @@ test("real extension Incognito messages, session expiry and worker restart", asy
     const id = new URL(worker.url).host;
     let regular = await chrome.page(`chrome-extension://${id}/options.html`);
     expect((await message(regular, { type: "snapshot" })).ok).toBe(true);
+    const enabled = await message(regular, {
+      type: "settings.update",
+      patch: { enabled: true },
+    });
+    expect(enabled.ok).toBe(true);
+    expect(enabled.value.settings.routing.globalServerId).toBe(
+      "internal-default",
+    );
+    expect(enabled.value.proxy.applied).toBe(true);
     const extensions = await chrome.page("chrome://extensions/");
     await evaluate(
       extensions,
@@ -608,6 +617,47 @@ test("real extension Incognito messages, session expiry and worker restart", asy
         );
       }
     }
+    expect(
+      (
+        await message(regular, {
+          type: "server.select",
+          serverId: catalog.value[0].id,
+        })
+      ).ok,
+    ).toBe(true);
+    expect(
+      (
+        await message(regular, {
+          type: "settings.update",
+          patch: { enabled: false, randomMode: false },
+        })
+      ).ok,
+    ).toBe(true);
+    await evaluate(regular, "chrome.storage.local.set({'servers.v1':[]})");
+    const retiringWorker = (await chrome.targets()).find(
+      (target) => target.type === "service_worker",
+    );
+    await chrome.browser("Target.closeTarget", { targetId: retiringWorker.id });
+    const retired = await message(regular, { type: "snapshot" });
+    expect(retired.ok).toBe(true);
+    expect(retired.value.settings.routing.globalServerId).toBe(
+      catalog.value[0].id,
+    );
+    expect(
+      retired.value.history.some(
+        (entry) => entry.serverId === catalog.value[0].id,
+      ),
+    ).toBe(true);
+    expect((await message(regular, { type: "settings.export" })).ok).toBe(true);
+    expect((await message(regular, { type: "history.clear" })).ok).toBe(true);
+    expect(
+      (
+        await message(regular, {
+          type: "server.select",
+          serverId: "internal-default",
+        })
+      ).ok,
+    ).toBe(true);
   } finally {
     await chrome.close();
   }
@@ -623,12 +673,15 @@ test("Incognito mandatory PAC runtime errors never fall back to a non-loopback t
     );
   const fixture = await mkdtemp(join(tmpdir(), "pac-control-"));
   let hits = 0;
+  let socksRequests = 0;
   const target = Bun.serve({
     hostname: "0.0.0.0",
     port: 0,
     fetch(request) {
       if (new URL(request.url).pathname === "/probe") hits++;
-      return new Response("controlled target");
+      return new Response("controlled target", {
+        headers: { Connection: "close" },
+      });
     },
   });
   const clients = new Set();
@@ -650,6 +703,7 @@ test("Incognito mandatory PAC runtime errors never fall back to a non-loopback t
         buffer[3] === 3 ? 7 + buffer[4] : buffer[3] === 1 ? 10 : 22;
       if (buffer.length < length) return;
       socket.removeListener("data", handshake);
+      socksRequests++;
       const upstream = connectTcp(target.port, ip, () => {
         socket.write(Buffer.from([5, 0, 0, 1, 0, 0, 0, 0, 0, 0]));
         if (buffer.length > length) upstream.write(buffer.subarray(length));
@@ -686,7 +740,7 @@ test("Incognito mandatory PAC runtime errors never fall back to a non-loopback t
       "<!doctype html><title>PAC browser control</title>",
     );
     chrome = await launch(fixture, [
-      `--host-resolver-rules=MAP probe.test ${ip}`,
+      `--host-resolver-rules=MAP probe.test ${ip}, MAP *.probe.test ${ip}`,
     ]);
     const worker = await waitFor(
       async () =>
@@ -734,9 +788,9 @@ test("Incognito mandatory PAC runtime errors never fall back to a non-loopback t
       });
     };
     let sequence = 0;
-    const request = async () => {
+    const request = async (host = "probe.test") => {
       const result = await page("Page.navigate", {
-        url: `http://probe.test:${target.port}/probe?${sequence++}`,
+        url: `http://${host}:${target.port}/probe?${sequence++}`,
       });
       await Bun.sleep(200);
       return result;
@@ -767,6 +821,78 @@ test("Incognito mandatory PAC runtime errors never fall back to a non-loopback t
       );
       expect(hits).toBe(2);
     }
+    const mixedPac = generatePac({
+      settings: {
+        enabled: false,
+        globalServerId: null,
+        randomMode: false,
+        exclusions: [],
+        rules: [
+          { host: "blocked.probe.test", enabled: true, serverId: "retired" },
+          {
+            host: "proxy-control.probe.test",
+            enabled: true,
+            serverId: "controlled.relays.mullvad.net",
+          },
+          {
+            host: "proxied.probe.test",
+            enabled: true,
+            serverId: "controlled.relays.mullvad.net",
+          },
+        ],
+      },
+      servers: [
+        {
+          id: "controlled.relays.mullvad.net",
+          hostname: "controlled.relays.mullvad.net",
+          ipv4: ip,
+          ipv6: "",
+          port: socks.address().port,
+          online: true,
+          country: "Control",
+          countryCode: "XX",
+          city: "Control",
+        },
+      ],
+      sessionSeed: "mixed-control",
+    });
+    await install(mixedPac);
+    const mixedBaseline = hits;
+    expect(
+      (await request("direct-control.probe.test")).errorText,
+    ).toBeUndefined();
+    expect(
+      (await request("proxy-control.probe.test")).errorText,
+    ).toBeUndefined();
+    expect(hits).toBe(mixedBaseline + 2);
+    expect((await request("blocked.probe.test")).errorText).toBe(
+      "net::ERR_MANDATORY_PROXY_CONFIGURATION_FAILED",
+    );
+    expect(hits).toBe(mixedBaseline + 2);
+    // Fresh destination hosts prevent earlier successful PAC decisions masking backoff.
+    const afterError = {};
+    for (const host of ["direct.probe.test", "proxied.probe.test"]) {
+      const beforeHits = hits;
+      const beforeSocks = socksRequests;
+      const result = await request(host);
+      if (result.errorText) {
+        expect(result.errorText).toBe(
+          "net::ERR_MANDATORY_PROXY_CONFIGURATION_FAILED",
+        );
+        expect(hits).toBe(beforeHits);
+        afterError[host] = "mandatory-backoff";
+      } else {
+        expect(hits).toBe(beforeHits + 1);
+        if (host === "proxied.probe.test")
+          expect(socksRequests).toBeGreaterThan(beforeSocks);
+        afterError[host] = host.startsWith("direct") ? "direct" : "socks5";
+      }
+    }
+    // Chromium may back off the entire mandatory PAC after one destination throws.
+    console.log(
+      "Mixed mandatory PAC after runtime error:",
+      JSON.stringify(afterError),
+    );
     await evaluate(control, `chrome.windows.remove(${window.id})`);
   } finally {
     if (chrome) await chrome.close();
