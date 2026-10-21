@@ -39,7 +39,7 @@ The browser suite requires `chromium`, `Xvfb`, and `xdotool` on `PATH`. It uses 
 
 ## Routing and privacy limits
 
-Rules apply to each request's destination, not every resource loaded by a particular tab. With random mode off, exclusions bypass the proxy. Random mode overrides saved proxy selections and exclusions; local destinations still bypass the proxy.
+Rules apply to each request's destination, not every resource loaded by a particular tab. With random mode off, exclusions bypass the proxy. Random mode overrides saved proxy selections and exclusions. Private, loopback, link-local and multicast IP literals bypass the proxy, as do `localhost` and its subdomains.
 
 The extension uses mandatory Chrome PAC configuration and does not append a direct fallback to SOCKS5 routes. This is not a system-wide kill switch. Disabling the extension, changing browser settings, or using another application falls outside its routing controls.
 
