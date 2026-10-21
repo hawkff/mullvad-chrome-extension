@@ -69,4 +69,5 @@ export const fixture: Snapshot = {
     dns: { status: "unknown" },
   },
   history: [],
+  favorites: [],
 };

@@ -120,12 +120,15 @@ export interface SettingsExport {
   version: 1;
   settings: Settings;
   history: HistoryEntry[];
+  favorites: string[];
 }
 export interface ImportPreview {
   format: "native" | "firefox";
   routing: Omit<RoutingSettings, "randomMode"> & { randomMode?: boolean };
   preferences?: Preferences;
   history?: HistoryEntry[];
+  // Backups made before favorites existed leave the current favorites in place.
+  favorites?: string[];
 }
 export interface Snapshot {
   context: BrowserContext;
@@ -138,6 +141,7 @@ export interface Snapshot {
   diagnostics: Diagnostics;
   privacy: PrivacyStatus;
   history: HistoryEntry[];
+  favorites: string[];
 }
 export type ValidationResult<T> =
   | { ok: true; value: T }

@@ -13,6 +13,7 @@
   --red: #e34039;
   --red-text: #ffb5af;
   --track: #56708d;
+  --subtle: #7d95b0;
   background: var(--navy);
   scrollbar-color: var(--track) transparent;
 }
@@ -283,14 +284,6 @@ header {
   stroke-width: 2;
   stroke-linecap: round;
 }
-.tag {
-  padding: 1px 7px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  color: var(--muted);
-  font-size: 11.5px;
-  font-weight: 600;
-}
 header > .ghost {
   margin-left: auto;
 }
@@ -430,6 +423,9 @@ main {
   color: var(--yellow);
   font-size: 12.5px;
 }
+.status + .notice {
+  margin-top: 10px;
+}
 .empty {
   color: var(--soft);
 }
@@ -479,18 +475,28 @@ summary:hover {
   font-size: 12.5px;
   font-weight: 600;
 }
-.server-list button {
+.relay-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  width: 100%;
+}
+.server-list button {
   min-height: 0;
-  padding: 5px 12px 5px 36px;
   border: 0;
   border-radius: 0;
   background: transparent;
+}
+.select {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px 8px 5px 36px;
   text-align: left;
+}
+.select.place {
+  padding-left: 24px;
 }
 .server-list button:hover:not(:disabled) {
   background: var(--card);
@@ -499,8 +505,31 @@ summary:hover {
 .server-list button:focus-visible {
   outline-offset: -2px;
 }
-.server-list button[aria-current] {
+.select[aria-current] {
   background: rgb(68 173 77 / 14%);
+}
+.star {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 36px;
+  height: 32px;
+  padding: 0;
+}
+.star svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: var(--subtle);
+  stroke-width: 1.8;
+  stroke-linejoin: round;
+}
+.star[aria-pressed="true"] svg {
+  fill: var(--yellow);
+  stroke: var(--yellow);
+}
+.star[aria-pressed="false"]:hover:not(:disabled) svg {
+  stroke: var(--muted);
 }
 .relay {
   color: var(--text);
@@ -617,8 +646,7 @@ footer {
   width: 384px;
   max-height: 600px;
 }
-.popup header,
-.popup footer {
+.popup header {
   flex-shrink: 0;
 }
 /* The top padding keeps focus rings at the scroll edge visible. */

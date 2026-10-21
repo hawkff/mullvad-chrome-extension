@@ -116,6 +116,24 @@ test("App browser workflows, responsive layout and keyboard focus", async () => 
     await wait(
       "!Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Change global location')?.disabled",
     );
+    // Opening the popup runs the connection checks and reads the current website.
+    await wait(
+      "document.querySelector('.checks')?.textContent.includes('Mullvad · 198.51.100.24')",
+    );
+    await wait(
+      "document.querySelector('.hostname')?.textContent === 'news.example.org'",
+    );
+    expect(
+      await evaluate(
+        "document.body.textContent.includes('Connects directly. Choose a location to proxy only this website.')",
+      ),
+    ).toBe(true);
+    expect(
+      await evaluate(
+        "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Use active website')",
+      ),
+    ).toBe(false);
+    expect(await evaluate("!!document.querySelector('footer')")).toBe(false);
     await evaluate("document.querySelector('input[type=checkbox]').click()");
     await wait("document.querySelector('input[type=checkbox]').checked");
     await click("Change global location");
@@ -134,12 +152,24 @@ test("App browser workflows, responsive layout and keyboard focus", async () => 
         "document.querySelector('.server-list').textContent.includes('Gothenburg')",
       ),
     ).toBe(true);
+    await evaluate("document.querySelector('.server-list .star').click()");
+    await wait(
+      "document.querySelector('.server-list .star')?.getAttribute('aria-pressed') === 'true'",
+    );
+    await evaluate(
+      `(()=>{const input=document.querySelector('#server-search');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'');input.dispatchEvent(new Event('input',{bubbles:true}));})()`,
+    );
+    // An empty search shows favorites above the full list.
+    await wait(
+      "document.querySelector('.server-list .country')?.textContent === 'Favorites'",
+    );
+    expect(
+      await evaluate(
+        "document.querySelector('.server-list li').textContent.includes('Gothenburg, Sweden')",
+      ),
+    ).toBe(true);
     await click("Close");
     await wait("!document.querySelector('#server-search')");
-    await click("Use active website");
-    await wait(
-      "document.querySelector('[role=alert]')?.textContent.includes('denied')",
-    );
     await cdp("Input.dispatchKeyEvent", {
       type: "keyDown",
       key: "Tab",
@@ -159,6 +189,35 @@ test("App browser workflows, responsive layout and keyboard focus", async () => 
         "document.body.textContent.includes('Effective private routing is not confirmed')",
       ),
     ).toBe(false);
+    expect(
+      await evaluate(
+        "document.body.textContent.includes('Nothing gets through')",
+      ),
+    ).toBe(false);
+    // A failed check explains what to do instead of leaving a silent red pill.
+    await cdp("Page.navigate", { url: `${server.url}popup.html?offline` });
+    await wait(
+      "document.querySelector('.notice')?.textContent === \"The connection check failed. Make sure you're online and Mullvad VPN is connected.\"",
+    );
+    // Local addresses connect directly even in random mode, as in the PAC.
+    await cdp("Page.navigate", { url: `${server.url}popup.html?local` });
+    await wait(
+      "document.body.textContent.includes('Local address. It always connects directly.')",
+    );
+    // A favorite that left the server list keeps its star so it can be removed.
+    await cdp("Page.navigate", { url: `${server.url}popup.html?retired` });
+    // A disabled fieldset disables its buttons without setting their disabled property.
+    await wait(
+      "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Change global location' && !b.matches(':disabled'))",
+    );
+    await click("Change global location");
+    await wait(
+      "document.querySelector('.server-list li')?.textContent.includes('No longer listed')",
+    );
+    await evaluate("document.querySelector('.server-list .star').click()");
+    await wait(
+      "!document.querySelector('.server-list').textContent.includes('No longer listed')",
+    );
     await cdp("Page.navigate", { url: `${server.url}options.html` });
     await wait(
       "document.body.textContent.includes('This regular page does not inspect or monitor private routing')",
@@ -176,17 +235,16 @@ test("App browser workflows, responsive layout and keyboard focus", async () => 
         "Array.from(document.querySelectorAll('button')).some(b=>b.textContent.trim()==='Use active website')",
       ),
     ).toBe(false);
+    // Reloading needs no permission prompt: the popup click grants access to that tab.
     await evaluate(
       "Array.from(document.querySelectorAll('label')).find(l=>l.textContent.includes('Reload the active website')).querySelector('input').click()",
     );
     await wait(
-      "document.querySelector('[role=alert]')?.textContent.includes('denied tab access')",
+      "Array.from(document.querySelectorAll('label')).find(l=>l.textContent.includes('Reload the active website')).querySelector('input').checked",
     );
-    expect(
-      await evaluate(
-        "Array.from(document.querySelectorAll('label')).find(l=>l.textContent.includes('Reload the active website')).querySelector('input').checked",
-      ),
-    ).toBe(false);
+    expect(await evaluate("!!document.querySelector('[role=alert]')")).toBe(
+      false,
+    );
     await cdp("Page.navigate", { url: `${server.url}options.html?incognito` });
     await wait("document.body.textContent.includes('Incognito window')");
     await wait("document.body.textContent.includes('Browser proxy')");
@@ -259,16 +317,18 @@ test("App browser workflows, responsive layout and keyboard focus", async () => 
       ).toBe(true);
     }
     await cdp("Page.navigate", { url: `${server.url}popup.html?incognito` });
-    await wait("document.body.textContent.includes('Run checks')");
-    await click("Run checks");
+    // A spanning worker cannot run checks on the private route, so private popups never start them.
     await wait(
-      "document.querySelector('[role=alert]')?.textContent.includes('private-route fetch')",
+      "document.body.textContent.includes('Checks run in regular windows only')",
     );
     expect(
       await evaluate(
-        "document.body.textContent.includes('No regular observations were returned')",
+        "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Check again')",
       ),
-    ).toBe(true);
+    ).toBe(false);
+    await wait(
+      "document.querySelector('.hostname')?.textContent === 'news.example.org'",
+    );
     await cdp("Emulation.setEmulatedMedia", {
       features: [{ name: "prefers-reduced-motion", value: "reduce" }],
     });

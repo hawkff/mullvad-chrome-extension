@@ -23,32 +23,82 @@ if (location.search.includes("incognito")) {
     message: "Private routing inherited",
   };
 }
+const incognito = location.search.includes("incognito");
+// The popup's current website, as Chrome reports it after a toolbar click.
+const tab = {
+  id: 9,
+  windowId: 1,
+  active: true,
+  incognito,
+  url: location.search.includes("local")
+    ? "http://192.168.1.10/"
+    : "https://news.example.org/story",
+};
+if (location.search.includes("local")) state.settings.routing.randomMode = true;
+if (location.search.includes("retired")) state.favorites = ["retired-relay"];
 Object.defineProperty(globalThis, "chrome", {
   value: {
-    extension: { inIncognitoContext: location.search.includes("incognito") },
+    extension: { inIncognitoContext: incognito },
     permissions: { request: async () => false },
+    windows: { getCurrent: async () => ({ id: 1, incognito }) },
+    tabs: {
+      query: async () => [{ id: tab.id }],
+      get: async () => tab,
+      reload: async () => undefined,
+    },
     runtime: {
       openOptionsPage: () => {},
       sendMessage: async (command: {
         type: string;
-        patch?: object;
+        patch?: Record<string, boolean>;
         context?: string;
         data?: unknown;
+        serverId?: string;
+        favorite?: boolean;
       }) => {
         state.context =
           command.context === "incognito" ? "incognito" : "regular";
         if (command.type === "settings.update") {
-          Object.assign(state.settings.routing, command.patch);
+          const { autoReload, historyEnabled, ...routing } =
+            command.patch ?? {};
+          Object.assign(state.settings.routing, routing);
+          Object.assign(
+            state.settings.preferences,
+            autoReload === undefined ? {} : { autoReload },
+            historyEnabled === undefined ? {} : { historyEnabled },
+          );
           if (state.context === "incognito")
             state.incognitoProxy.settingScope = "incognito_session_only";
         }
-        if (command.type === "diagnostics.run" && state.context === "incognito")
+        if (command.type === "favorite.set" && command.serverId) {
+          state.favorites = state.favorites.filter(
+            (id) => id !== command.serverId,
+          );
+          if (command.favorite) state.favorites.push(command.serverId);
+        }
+        if (command.type === "diagnostics.run")
           return {
-            ok: false,
-            error: {
-              code: "blocked",
-              message:
-                "Chrome cannot guarantee a private-route fetch from this spanning worker. No regular observations were returned.",
+            ok: true,
+            value: {
+              ...structuredClone(state),
+              diagnostics: {
+                scope: "browser-route",
+                ipv4: location.search.includes("offline")
+                  ? { status: "error", message: "Timed out" }
+                  : {
+                      status: "ready",
+                      updatedAt: Date.now(),
+                      value: { ip: "198.51.100.24", isMullvad: true },
+                    },
+                ipv6: { status: "error", message: "No IPv6 route" },
+                dns: {
+                  status: "ready",
+                  updatedAt: Date.now(),
+                  value: [
+                    { ip: "198.51.100.53", isMullvad: true, hostname: "dns" },
+                  ],
+                },
+              },
             },
           };
         if (

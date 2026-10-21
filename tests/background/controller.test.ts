@@ -23,6 +23,7 @@ const routingCore = {
         "diagnostics.run",
         "privacy.set",
         "privacy.restore",
+        "favorite.set",
       ].includes(value.type) ||
       (value.context && !["regular", "incognito"].includes(value.context))
     )
@@ -66,6 +67,7 @@ let rtc: unknown;
 let rtcOwner: string;
 let onProxySet: (() => void) | undefined;
 let privateQueries: number;
+let toolbar: { icon?: unknown; title?: string; badge?: string };
 function area(data: () => Record<string, unknown>, persistent: boolean) {
   return {
     get: async (key: string) => ({ [key]: structuredClone(data()[key]) }),
@@ -91,6 +93,7 @@ beforeEach(() => {
   writes = 0;
   onProxySet = undefined;
   privateQueries = 0;
+  toolbar = {};
   rtc = "default";
   rtcOwner = "controllable_by_this_extension";
   Object.assign(globalThis, {
@@ -171,7 +174,15 @@ beforeEach(() => {
         },
       },
       action: {
-        setBadgeText: async () => undefined,
+        setIcon: async ({ path }: { path: unknown }) => {
+          toolbar.icon = path;
+        },
+        setTitle: async ({ title }: { title: string }) => {
+          toolbar.title = title;
+        },
+        setBadgeText: async ({ text }: { text: string }) => {
+          toolbar.badge = text;
+        },
         setBadgeBackgroundColor: async () => undefined,
       },
     },
@@ -422,6 +433,73 @@ test("random mode stays off until the session pool has an online server", async 
   expect(writes).toBe(0);
   expect(regular).toEqual({ mode: "system" });
   expect((await snapshot(controller)).settings.routing.randomMode).toBe(false);
+});
+test("connection checks do not hold routing changes", async () => {
+  let release: (() => void) | undefined;
+  const fetcher = spyOn(globalThis, "fetch").mockImplementation(
+    (() =>
+      new Promise<Response>((resolve) => {
+        release = () =>
+          resolve(Response.json({ ip: "198.51.100.1", mullvad_exit_ip: true }));
+      })) as unknown as typeof fetch,
+  );
+  try {
+    const controller = new Controller(routingCore);
+    const check = controller.client({
+      type: "diagnostics.run",
+      checks: ["ipv4"],
+    });
+    for (let i = 0; i < 100 && !release; i++) await Bun.sleep(1);
+    expect(release).toBeDefined();
+    // This would wait forever if the hanging check held the command queue.
+    const update = await controller.client({
+      type: "settings.update",
+      patch: { autoReload: true },
+    });
+    expect(update.ok).toBe(true);
+    release?.();
+    const result = await check;
+    if (!result.ok) throw new Error(result.error.message);
+    expect(result.value.diagnostics.ipv4.status).toBe("ready");
+    expect(result.value.settings.preferences.autoReload).toBe(true);
+  } finally {
+    fetcher.mockRestore();
+  }
+});
+test("favorites change only from regular windows and never create a private override", async () => {
+  const controller = new Controller(routingCore);
+  expect(
+    await controller.client({
+      type: "favorite.set",
+      serverId: "internal-default",
+      favorite: true,
+      context: "incognito",
+    }),
+  ).toMatchObject({ ok: false, error: { code: "blocked" } });
+  expect(privateProxy).toBeUndefined();
+  expect(JSON.stringify(session)).not.toContain("privateState");
+});
+test("toolbar shows whether routing is on and where it exits", async () => {
+  const controller = new Controller(routingCore);
+  await snapshot(controller);
+  expect(toolbar).toEqual({
+    icon: { 16: "/icons/icon-off-16.png", 32: "/icons/icon-off-32.png" },
+    title: "Mullvad Proxy is off. Websites connect directly.",
+    badge: "",
+  });
+  await controller.client({
+    type: "server.select",
+    serverId: "internal-default",
+  });
+  expect(toolbar).toEqual({
+    icon: { 16: "/icons/icon-16.png", 32: "/icons/icon-32.png" },
+    title: "Mullvad Proxy is on. All websites via the VPN-internal proxy.",
+    badge: "ON",
+  });
+  owner = "controlled_by_other_extensions";
+  await snapshot(controller);
+  expect(toolbar.badge).toBe("!");
+  expect(toolbar.title).toContain("is blocked");
 });
 test("privacy denial does not claim an override", async () => {
   privacyPermission = false;
@@ -874,6 +952,54 @@ describe("real-core persisted routing", () => {
     expect(
       installedPac(privateProxy)("https://example.org", "example.org"),
     ).toBe("SOCKS5 185.213.154.99:1080");
+  });
+  test("the badge shows the exit country of the global relay", async () => {
+    const controller = new Controller();
+    await refresh(controller, [wire]);
+    await controller.client({ type: "server.select", serverId: wire.hostname });
+    expect(toolbar.badge).toBe("SE");
+    expect(toolbar.title).toBe(
+      "Mullvad Proxy is on. All websites via Gothenburg, Sweden.",
+    );
+  });
+  test("favorites persist, survive restarts and keep older backups compatible", async () => {
+    const controller = new Controller();
+    await refresh(controller, [wire, extra]);
+    for (const [serverId, favorite] of [
+      [wire.hostname, true],
+      [extra.hostname, true],
+      [extra.hostname, false],
+    ] as const)
+      expect(
+        (await controller.client({ type: "favorite.set", serverId, favorite }))
+          .ok,
+      ).toBe(true);
+    expect(
+      (
+        await controller.client({
+          type: "favorite.set",
+          serverId: "retired",
+          favorite: true,
+        })
+      ).ok,
+    ).toBe(false);
+    expect((await snapshot(new Controller())).favorites).toEqual([
+      wire.hostname,
+    ]);
+    const exported = await controller.client({ type: "settings.export" });
+    if (!exported.ok) throw new Error(exported.error.message);
+    expect(exported.value.favorites).toEqual([wire.hostname]);
+    // Backups made before favorites existed leave the current list alone.
+    const { favorites: _, ...older } = exported.value;
+    expect(
+      (await controller.client({ type: "settings.import", data: older })).ok,
+    ).toBe(true);
+    expect((await snapshot(controller)).favorites).toEqual([wire.hostname]);
+    // Settings saved before favorites existed still load.
+    const saved = structuredClone(local["state.v1"]) as Record<string, unknown>;
+    delete saved.favorites;
+    local["state.v1"] = saved;
+    expect((await snapshot(new Controller())).favorites).toEqual([]);
   });
   test("invalid imports cannot mutate proxy or storage", async () => {
     const controller = new Controller();

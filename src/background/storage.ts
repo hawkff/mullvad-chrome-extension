@@ -6,6 +6,7 @@ export interface Stored {
   revision: number;
   settings: Settings;
   history: HistoryEntry[];
+  favorites: string[];
 }
 export interface Session {
   seed: string;
@@ -29,6 +30,7 @@ export function defaults(): Stored {
       preferences: { autoReload: false, historyEnabled: true },
     },
     history: [],
+    favorites: [],
   };
 }
 export function validateStored(input: unknown): Stored {
@@ -46,6 +48,7 @@ export function validateStored(input: unknown): Stored {
     version: 1,
     settings: input.settings,
     history: input.history,
+    ...(input.favorites === undefined ? {} : { favorites: input.favorites }),
   });
   if (!result.ok || !result.value.preferences || !result.value.history)
     throw new Error("Invalid saved settings; no data was overwritten.");
@@ -60,6 +63,7 @@ export function validateStored(input: unknown): Stored {
       preferences: result.value.preferences,
     },
     history: result.value.history,
+    favorites: result.value.favorites ?? [],
   };
 }
 export function validPool(input: unknown): Server[] {

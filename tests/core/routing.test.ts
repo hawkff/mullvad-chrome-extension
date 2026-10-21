@@ -587,3 +587,34 @@ describe("underscore DNS host compatibility", () => {
     });
   });
 });
+
+test("saved favorites are optional, unique strings and validated as commands", () => {
+  const saved = {
+    version: 1,
+    settings: {
+      routing: context().settings,
+      preferences: { autoReload: false, historyEnabled: true },
+    },
+    history: [],
+  };
+  const older = validatePersistedSettings(saved);
+  if (!older.ok) throw new Error(older.error);
+  expect(older.value.favorites).toBeUndefined();
+  expect(
+    validatePersistedSettings({ ...saved, favorites: ["a", "b"] }),
+  ).toEqual({ ok: true, value: { ...older.value, favorites: ["a", "b"] } });
+  for (const favorites of [["a", "a"], [1], "a", [""]])
+    expect(validatePersistedSettings({ ...saved, favorites }).ok).toBe(false);
+  expect(
+    validateCommand({ type: "favorite.set", serverId: id, favorite: true }),
+  ).toEqual({
+    ok: true,
+    value: { type: "favorite.set", serverId: id, favorite: true },
+  });
+  for (const data of [
+    { type: "favorite.set", serverId: id },
+    { type: "favorite.set", serverId: id, favorite: "yes" },
+    { type: "favorite.set", serverId: "", favorite: true },
+  ])
+    expect(validateCommand(data).ok).toBe(false);
+});

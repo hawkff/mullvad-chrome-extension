@@ -164,6 +164,18 @@ async function launch(extension, flags = [], display) {
       attach,
       page,
       downloads: join(profile, "downloads"),
+      // Acts like a toolbar click on the tab showing url, so Chrome grants activeTab.
+      async clickAction(extensionId, url) {
+        const { targetInfos } = await browser("Target.getTargets", {
+          filter: [{ type: "tab" }],
+        });
+        const tab = targetInfos.find((target) => target.url === url);
+        if (!tab) throw Error(`No tab shows ${url}`);
+        await browser("Extensions.triggerAction", {
+          id: extensionId,
+          targetId: tab.targetId,
+        });
+      },
       async close() {
         for (const connection of connections) connection.close();
         process.kill();
@@ -1169,8 +1181,7 @@ test("actual optional permission grants and revocation", async () => {
     );
     page = await incognitoOptions(chrome, extensions, id, page);
     const grantPending = page("Runtime.evaluate", {
-      expression:
-        "chrome.permissions.request({permissions:['privacy','tabs']})",
+      expression: "chrome.permissions.request({permissions:['privacy']})",
       userGesture: true,
       awaitPromise: true,
       returnByValue: true,
@@ -1192,8 +1203,7 @@ test("actual optional permission grants and revocation", async () => {
       ).ok,
     ).toBe(false);
     const accepted = page("Runtime.evaluate", {
-      expression:
-        "chrome.permissions.request({permissions:['privacy','tabs']})",
+      expression: "chrome.permissions.request({permissions:['privacy']})",
       userGesture: true,
       awaitPromise: true,
       returnByValue: true,
@@ -1246,21 +1256,29 @@ test("actual optional permission grants and revocation", async () => {
       async () =>
         (await message(page, { type: "snapshot" })).value.settings.preferences
           .autoReload,
-      "auto-reload preference enabled with granted tabs access",
+      "auto-reload preference enabled without a permission prompt",
     );
     const reloadUrl = new URL("reload", reloadServer.url).href;
+    // A click during loading grants access to the old page, which Chrome revokes on navigation.
+    const loaded = (tabId) =>
+      waitFor(
+        () =>
+          evaluate(
+            page,
+            `chrome.tabs.get(${tabId}).then(tab => tab.status === 'complete')`,
+          ),
+        "tab finished loading",
+      );
     const liveTab = await evaluate(
       page,
       `chrome.tabs.create({url:${JSON.stringify(reloadUrl)},active:true})`,
     );
     await waitFor(() => reloadHits === 1, "initial controlled website load");
+    await loaded(liveTab.id);
     const oldTargets = new Set(
       (await chrome.targets()).map((target) => target.id),
     );
-    await evaluate(
-      page,
-      `chrome.action.openPopup({windowId:${liveTab.windowId}})`,
-    );
+    await chrome.clickAction(id, reloadUrl);
     const popupTarget = await waitFor(
       async () =>
         (await chrome.targets()).find(
@@ -1334,18 +1352,17 @@ test("actual optional permission grants and revocation", async () => {
     const privateOld = new Set(
       (await chrome.targets()).map((target) => target.id),
     );
+    const privateUrl = `${reloadUrl}?private`;
     const privateWindow = await evaluate(
       page,
-      `chrome.windows.create({incognito:true,url:${JSON.stringify(reloadUrl)}})`,
+      `chrome.windows.create({incognito:true,url:${JSON.stringify(privateUrl)}})`,
     );
     await waitFor(
       () => reloadHits === 4,
       "initial private controlled website load",
     );
-    await evaluate(
-      page,
-      `chrome.action.openPopup({windowId:${privateWindow.id}})`,
-    );
+    await loaded(privateWindow.tabs[0].id);
+    await chrome.clickAction(id, privateUrl);
     const privateTarget = await waitFor(
       async () =>
         (await chrome.targets()).find(
@@ -1445,63 +1462,60 @@ test("actual optional permission grants and revocation", async () => {
     expect(
       await evaluate(
         page,
-        "chrome.permissions.remove({permissions:['privacy','tabs']})",
+        "chrome.permissions.remove({permissions:['privacy']})",
       ),
     ).toBe(true);
     expect(
       await evaluate(
         page,
-        "chrome.permissions.contains({permissions:['privacy','tabs']})",
+        "chrome.permissions.contains({permissions:['privacy']})",
       ),
     ).toBe(false);
-    const revokedTargets = new Set(
+    // A popup opened by script, not a toolbar click, gets no activeTab grant.
+    const unclickedTargets = new Set(
       (await chrome.targets()).map((target) => target.id),
     );
     await evaluate(
       page,
       `chrome.action.openPopup({windowId:${liveTab.windowId}})`,
     );
-    const revokedTarget = await waitFor(
+    const unclickedTarget = await waitFor(
       async () =>
         (await chrome.targets()).find(
           (target) =>
             target.url.endsWith("/popup.html") &&
-            !revokedTargets.has(target.id),
+            !unclickedTargets.has(target.id),
         ),
-      "popup after tab permission revocation",
+      "popup opened without a toolbar click",
     );
-    const revokedPopup = await chrome.attach(revokedTarget.id);
+    const unclickedPopup = await chrome.attach(unclickedTarget.id);
     await waitFor(
       () =>
         evaluate(
-          revokedPopup,
+          unclickedPopup,
           "Boolean(document.querySelector('input[type=checkbox]'))",
         ),
-      "revoked-permission popup ready",
+      "unclicked popup ready",
     );
+    expect(
+      await evaluate(
+        unclickedPopup,
+        "Boolean(document.querySelector('.hostname'))",
+      ),
+    ).toBe(false);
     await evaluate(
-      revokedPopup,
+      unclickedPopup,
       "document.querySelector('input[type=checkbox]').click()",
     );
     await waitFor(
       () =>
         evaluate(
-          revokedPopup,
-          "document.querySelector('[role=alert]')?.textContent.includes('Tab access is unavailable')",
+          unclickedPopup,
+          "document.querySelector('[role=alert]')?.textContent.includes('HTTP or HTTPS')",
         ),
-      "visible revoked-permission reload failure",
+      "reload refused without access to the tab",
     );
     expect(reloadHits).toBe(afterPrivateHits);
-    if (Bun.env.BROWSER_EVIDENCE_DIR) {
-      await mkdir(Bun.env.BROWSER_EVIDENCE_DIR, { recursive: true });
-      const image = await revokedPopup("Page.captureScreenshot", {
-        format: "png",
-      });
-      await writeFile(
-        join(Bun.env.BROWSER_EVIDENCE_DIR, "autoreload-permission-error.png"),
-        Buffer.from(image.data, "base64"),
-      );
-    }
     expect(
       (
         await message(page, {

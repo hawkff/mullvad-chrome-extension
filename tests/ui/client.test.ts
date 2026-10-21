@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { proxyStatus } from "../../src/shared/status";
 import {
   currentWebsiteTab,
   exitStatus,
@@ -6,7 +7,6 @@ import {
   incognitoScopeDescription,
   isImportPreview,
   isSnapshot,
-  proxyStatus,
   resolveUiContext,
   searchServers,
   validateResponse,
@@ -109,6 +109,8 @@ test("freshness distinguishes unknown, blocked and stale data", () => {
 
 test("status summary names route exceptions and any non-Mullvad address", () => {
   const snapshot = structuredClone(fixture);
+  const servers =
+    snapshot.servers.status === "ready" ? snapshot.servers.value : [];
   snapshot.proxy = { ...snapshot.proxy, applied: true, status: "ready" };
   snapshot.settings.routing = {
     ...snapshot.settings.routing,
@@ -117,36 +119,42 @@ test("status summary names route exceptions and any non-Mullvad address", () => 
     rules: [{ host: "example.com", enabled: true, serverId: "de-ber-001" }],
     exclusions: ["intranet.example"],
   };
-  expect(proxyStatus(snapshot, "regular", "Gothenburg, Sweden")).toEqual({
+  const { routing } = snapshot.settings;
+  expect(proxyStatus(snapshot.proxy, routing, servers)).toEqual({
     tone: "on",
     title: "Proxy on",
     detail:
       "All websites via Gothenburg, Sweden, except 1 website rule and 1 exclusion.",
   });
-  snapshot.settings.routing.enabled = false;
+  routing.globalServerId = "retired";
+  expect(proxyStatus(snapshot.proxy, routing, servers).detail).toContain(
+    "via an unavailable server",
+  );
+  routing.enabled = false;
   snapshot.proxy.applied = false;
-  expect(proxyStatus(snapshot, "regular", "").tone).toBe("warn");
-  snapshot.settings.routing.rules = [];
-  expect(proxyStatus(snapshot, "regular", "").title).toBe("Proxy off");
-  snapshot.diagnostics.ipv4 = {
+  expect(proxyStatus(snapshot.proxy, routing, servers).tone).toBe("warn");
+  routing.rules = [];
+  expect(proxyStatus(snapshot.proxy, routing, servers).title).toBe("Proxy off");
+  const checks = structuredClone(snapshot.diagnostics);
+  checks.ipv4 = {
     status: "ready",
     updatedAt: 1,
     value: { ip: "198.51.100.1", isMullvad: true },
   };
-  expect(exitStatus(snapshot)).toEqual(["on", "Mullvad · 198.51.100.1"]);
-  snapshot.diagnostics.ipv6 = {
+  expect(exitStatus(checks)).toEqual(["on", "Mullvad · 198.51.100.1"]);
+  checks.ipv6 = {
     status: "ready",
     updatedAt: 1,
     value: { ip: "2001:db8::1", isMullvad: false },
   };
-  expect(exitStatus(snapshot)).toEqual(["error", "Not Mullvad · 2001:db8::1"]);
-  snapshot.diagnostics.ipv4 = { status: "error", message: "Timed out" };
-  snapshot.diagnostics.ipv6 = {
+  expect(exitStatus(checks)).toEqual(["error", "Not Mullvad · 2001:db8::1"]);
+  checks.ipv4 = { status: "error", message: "Timed out" };
+  checks.ipv6 = {
     status: "ready",
     updatedAt: 1,
     value: { ip: "2001:db8::1", isMullvad: true },
   };
-  expect(exitStatus(snapshot)).toEqual(["on", "Mullvad · 2001:db8::1"]);
+  expect(exitStatus(checks)).toEqual(["on", "Mullvad · 2001:db8::1"]);
 });
 
 test("Incognito scope labels distinguish inheritance, overrides and unknown state", () => {
@@ -202,9 +210,14 @@ test("window context resolves before UI mount and never defaults on failure", as
 
 test("active website lookup uses its hosting window and rejects stale/unsafe targets", async () => {
   const previous = Object.getOwnPropertyDescriptor(globalThis, "chrome");
-  let allowed = true;
   let window = { id: 7, incognito: false };
-  let tab = {
+  let tab: {
+    id: number;
+    windowId: number;
+    active: boolean;
+    incognito: boolean;
+    url?: string;
+  } = {
     id: 4,
     windowId: 7,
     active: true,
@@ -215,7 +228,6 @@ test("active website lookup uses its hosting window and rejects stale/unsafe tar
     Object.defineProperty(globalThis, "chrome", {
       configurable: true,
       value: {
-        permissions: { contains: async () => allowed },
         windows: { getCurrent: async () => window },
         tabs: {
           query: async (query: object) => {
@@ -258,8 +270,11 @@ test("active website lookup uses its hosting window and rejects stale/unsafe tar
     window = { id: 7, incognito: true };
     expect((await currentWebsiteTab("incognito")).id).toBe(4);
     await expect(currentWebsiteTab("regular")).rejects.toThrow("context");
-    allowed = false;
-    await expect(currentWebsiteTab("incognito")).rejects.toThrow("Tab access");
+    // Without an activeTab grant Chrome omits the URL.
+    tab = { ...tab, url: undefined };
+    await expect(currentWebsiteTab("incognito")).rejects.toThrow(
+      "HTTP or HTTPS",
+    );
   } finally {
     if (previous) Object.defineProperty(globalThis, "chrome", previous);
     else Reflect.deleteProperty(globalThis, "chrome");

@@ -30,6 +30,7 @@ export type Command = { context?: BrowserContext } & (
     }
   | { type: "history.clear" }
   | { type: "history.remove"; serverId: string }
+  | { type: "favorite.set"; serverId: string; favorite: boolean }
   | { type: "settings.export" }
   | { type: "settings.import.preview"; data: unknown }
   | { type: "settings.import"; data: unknown }

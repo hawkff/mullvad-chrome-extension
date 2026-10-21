@@ -3,12 +3,13 @@ import type { Command, CommandResult, Response } from "../shared/messages";
 import type {
   BrowserContext,
   ConnectionObservation,
+  Diagnostics,
   DnsObservation,
   LoadState,
   ProxyStatus,
   Server,
-  Snapshot,
 } from "../shared/state";
+import { plural, type Tone } from "../shared/status";
 
 type Check = (value: unknown) => boolean;
 const text: Check = (v) => typeof v === "string";
@@ -111,6 +112,7 @@ export const isSnapshot = shape({
   revision: number,
   settings,
   history,
+  favorites: list(text),
   servers: load(
     list(
       shape({
@@ -155,8 +157,14 @@ export const isImportPreview = shape({
   routing: shape({ ...routingFields, randomMode: optional(bool) }),
   preferences: optional(preferences),
   history: optional(history),
+  favorites: optional(list(text)),
 });
-const isExport = shape({ version: oneOf(1), settings, history });
+const isExport = shape({
+  version: oneOf(1),
+  settings,
+  history,
+  favorites: list(text),
+});
 export function validateResponse(command: Command, response: unknown): boolean {
   return (
     shape({
@@ -232,64 +240,7 @@ export function freshness(state: LoadState<unknown>): string {
     : "Not checked";
 }
 
-export type Tone = "on" | "off" | "warn" | "error";
 export type Observed = LoadState<ConnectionObservation | DnsObservation[]>;
-const plural = (count: number, noun: string) =>
-  `${count} ${noun}${count === 1 ? "" : "s"}`;
-
-export function proxyStatus(
-  snapshot: Snapshot,
-  context: BrowserContext,
-  via: string,
-) {
-  const effective =
-    context === "incognito" ? snapshot.incognitoProxy : snapshot.proxy;
-  const routing = snapshot.settings.routing;
-  const rules = routing.rules.filter((rule) => rule.enabled).length;
-  const status = (tone: Tone, title: string, detail: string) => ({
-    tone,
-    title,
-    detail,
-  });
-  if (effective.status === "blocked")
-    return status("error", "Proxy blocked", effective.message ?? "");
-  if (effective.applied) {
-    if (routing.randomMode)
-      return status("on", "Proxy on", "Random location for each website.");
-    if (!routing.enabled)
-      return status(
-        "on",
-        "Proxy on",
-        `Rules for ${plural(rules, "website")}; other websites connect directly.`,
-      );
-    // Rules and exclusions override the global route for their hosts.
-    const exceptions = [
-      rules ? plural(rules, "website rule") : "",
-      routing.exclusions.length
-        ? plural(routing.exclusions.length, "exclusion")
-        : "",
-    ]
-      .filter(Boolean)
-      .join(" and ");
-    return status(
-      "on",
-      "Proxy on",
-      `All websites via ${via}${exceptions ? `, except ${exceptions}` : ""}.`,
-    );
-  }
-  if (
-    effective.status === "error" ||
-    routing.enabled ||
-    routing.randomMode ||
-    rules
-  )
-    return status(
-      "warn",
-      "Proxy not confirmed",
-      effective.message ?? `Status: ${effective.status}`,
-    );
-  return status("off", "Proxy off", "Websites connect directly.");
-}
 
 export function checkStatus(state: Observed): [Tone, string] {
   if (state.status === "unknown") return ["off", "Not checked"];
@@ -307,8 +258,7 @@ export function checkStatus(state: Observed): [Tone, string] {
   ];
 }
 
-export function exitStatus(snapshot: Snapshot): [Tone, string] {
-  const { ipv4, ipv6 } = snapshot.diagnostics;
+export function exitStatus({ ipv4, ipv6 }: Diagnostics): [Tone, string] {
   const ready = [ipv4, ipv6].filter((state) => state.status === "ready");
   // A non-Mullvad address on either family outranks any Mullvad result.
   return checkStatus(
@@ -344,10 +294,6 @@ export async function resolveUiContext(): Promise<BrowserContext> {
 export async function currentWebsiteTab(
   context: BrowserContext,
 ): Promise<{ id: number; url: string }> {
-  if (!(await chrome.permissions.contains({ permissions: ["tabs"] })))
-    throw new Error(
-      "Tab access is unavailable. Enable active-website reload again in regular settings to grant access, or reload manually.",
-    );
   const window = await chrome.windows.getCurrent({}).catch(() => {
     throw new Error("Cannot read this browsing window.");
   });
@@ -370,6 +316,7 @@ export async function currentWebsiteTab(
     tab.incognito !== window.incognito
   )
     throw new Error("The active website changed. Reload it manually.");
+  // activeTab exposes the URL only for the tab where the toolbar button was clicked.
   if (!tab.url || !["http:", "https:"].includes(new URL(tab.url).protocol))
     throw new Error("Open an HTTP or HTTPS website first.");
   return { id: selected.id, url: tab.url };

@@ -9,6 +9,7 @@ import {
   type Server,
   type Snapshot,
 } from "../shared/state";
+import { proxyStatus } from "../shared/status";
 import { emptyDiagnostics, runDiagnostics } from "./diagnostics";
 import { object, requestJson } from "./platform";
 import {
@@ -37,6 +38,12 @@ class Failure extends Error {
 const STATE = "state.v1";
 const SESSION = "session.v1";
 const CACHE = "servers.v1";
+// icon-off-*.png are icon.svg rendered with the globe stroke set to #8a9bb0.
+// setIcon resolves relative paths against background/, so these start at the root.
+const TOOLBAR_ICONS = {
+  on: { 16: "/icons/icon-16.png", 32: "/icons/icon-32.png" },
+  off: { 16: "/icons/icon-off-16.png", 32: "/icons/icon-off-32.png" },
+};
 type Setting = chrome.types.ChromeSettingGetResult<unknown>;
 function ownership(input: unknown): ProxyOwnership {
   return input === "not_controllable" ||
@@ -143,11 +150,14 @@ export class Controller {
     )
       await chrome.proxy.settings.clear({ scope: "incognito_session_only" });
   }
+  // Runs after every earlier queued task; a failed task does not stall later ones.
+  private queued<T>(task: () => Promise<T>): Promise<T> {
+    const result = this.tail.catch(() => undefined).then(task);
+    this.tail = result.catch(() => undefined);
+    return result;
+  }
   private enqueue(task: () => Promise<void>): void {
-    this.tail = this.tail
-      .catch(() => undefined)
-      .then(task)
-      .catch(() => undefined);
+    this.queued(task).catch(() => undefined);
   }
   private async initialize(): Promise<void> {
     if (this.initialized) return;
@@ -395,18 +405,7 @@ export class Controller {
             message:
               "Private proxy settings are not inspected from regular windows.",
           };
-    await Promise.all([
-      chrome.action.setBadgeText({
-        text: proxy.applied
-          ? "ON"
-          : proxy.status === "blocked" || proxy.status === "error"
-            ? "!"
-            : "",
-      }),
-      chrome.action.setBadgeBackgroundColor({
-        color: proxy.applied ? "#44ad4d" : "#d98c00",
-      }),
-    ]);
+    await this.updateToolbar(proxy);
     const settings = structuredClone(state.settings);
     settings.preferences.autoReload =
       this.state.settings.preferences.autoReload;
@@ -416,6 +415,8 @@ export class Controller {
       revision: state.revision,
       settings,
       history: context === "incognito" ? [] : structuredClone(state.history),
+      // Favorites are shared with regular windows, like the reload preference.
+      favorites: structuredClone(this.state.favorites),
       servers: structuredClone(this.servers),
       proxy,
       incognitoProxy,
@@ -477,7 +478,43 @@ export class Controller {
       throw error;
     }
   }
-  private async dispatch(command: Command): Promise<unknown> {
+  // The toolbar button is shared by every window, so it shows regular routing only.
+  private async updateToolbar(proxy: ProxyStatus): Promise<void> {
+    const routing = this.state.settings.routing;
+    const { tone, detail } = proxyStatus(proxy, routing, this.catalog());
+    const exit =
+      routing.enabled && !routing.randomMode
+        ? this.catalog().find((row) => row.id === routing.globalServerId)
+        : undefined;
+    const state = {
+      on: "is on",
+      off: "is off",
+      warn: "isn't confirmed",
+      error: "is blocked",
+    }[tone];
+    await Promise.all([
+      chrome.action.setIcon({
+        path: tone === "off" ? TOOLBAR_ICONS.off : TOOLBAR_ICONS.on,
+      }),
+      chrome.action.setTitle({
+        title: `Mullvad Proxy ${state}. ${detail}`.trim(),
+      }),
+      chrome.action.setBadgeText({
+        text:
+          tone === "on"
+            ? (exit?.countryCode.toUpperCase() ?? "ON")
+            : tone === "off"
+              ? ""
+              : "!",
+      }),
+      chrome.action.setBadgeBackgroundColor({
+        color: tone === "on" ? "#44ad4d" : "#d98c00",
+      }),
+    ]);
+  }
+  private async dispatch(
+    command: Exclude<Command, { type: "diagnostics.run" }>,
+  ): Promise<unknown> {
     const context = command.context ?? "regular";
     if (context === "incognito" && !(await this.privateUsable()))
       throw new Failure(
@@ -511,6 +548,7 @@ export class Controller {
           settings: structuredClone(next.settings),
           history:
             context === "incognito" ? [] : structuredClone(state.history),
+          favorites: structuredClone(this.state.favorites),
         };
       case "settings.import.preview":
       case "settings.import": {
@@ -535,6 +573,8 @@ export class Controller {
           next.settings.preferences = preview.value.preferences;
         if (preview.value.history && context === "regular")
           next.history = preview.value.history;
+        if (preview.value.favorites && context === "regular")
+          next.favorites = preview.value.favorites;
         break;
       }
       case "settings.update": {
@@ -628,6 +668,23 @@ export class Controller {
           (entry) => entry.serverId !== command.serverId,
         );
         break;
+      case "favorite.set": {
+        // A first private save creates a session routing override; a star must not.
+        if (context === "incognito")
+          throw new Failure(
+            "blocked",
+            "Favorites are shared with regular windows. Change them there.",
+          );
+        const id = command.serverId;
+        if (
+          command.favorite &&
+          !this.catalog().some((server) => server.id === id)
+        )
+          throw new Failure("invalid-input", "Select a known server.");
+        next.favorites = next.favorites.filter((entry) => entry !== id);
+        if (command.favorite) next.favorites.push(id);
+        break;
+      }
       case "servers.refresh": {
         if (context === "incognito")
           throw new Failure(
@@ -659,14 +716,6 @@ export class Controller {
         }
         await this.reconcileAll();
         return this.snapshot(context);
-      }
-      case "diagnostics.run": {
-        if (context === "incognito")
-          throw new Failure(
-            "blocked",
-            "A spanning service worker cannot guarantee private-context diagnostic requests. Open the official Mullvad check in a private tab instead.",
-          );
-        return this.snapshot(context, await runDiagnostics(command.checks));
       }
       case "privacy.set":
       case "privacy.restore": {
@@ -730,11 +779,42 @@ export class Controller {
     // Reload is intentionally UI-owned: the worker has no trusted active-tab target.
     return this.snapshot(context);
   }
+  private failure(error: unknown): Response<never> {
+    return {
+      ok: false,
+      error: {
+        code: error instanceof Failure ? error.code : "internal",
+        message:
+          error instanceof Failure
+            ? error.message
+            : "Operation failed. Existing proxy settings were not deliberately disabled; inspect Chrome ownership and retry.",
+      },
+    };
+  }
+  private async diagnose(
+    command: Extract<Command, { type: "diagnostics.run" }>,
+  ): Promise<Response<unknown>> {
+    try {
+      const context = command.context ?? "regular";
+      if (context === "incognito")
+        throw new Failure(
+          "blocked",
+          "A spanning service worker cannot guarantee private-context diagnostic requests. Open the official Mullvad check in a private tab instead.",
+        );
+      const diagnostics = await runDiagnostics(command.checks);
+      return {
+        ok: true,
+        value: await this.queued(() => this.snapshot(context, diagnostics)),
+      };
+    } catch (error) {
+      return this.failure(error);
+    }
+  }
   execute(
     input: unknown,
     sender?: chrome.runtime.MessageSender,
   ): Promise<Response<unknown>> {
-    const task = this.tail.then(async (): Promise<Response<unknown>> => {
+    return this.queued(async () => {
       try {
         const validation = this.routingCore.validateCommand(input);
         if (!validation.ok)
@@ -759,22 +839,14 @@ export class Controller {
             );
         }
         await this.initialize();
-        return { ok: true, value: await this.dispatch(validation.value) };
+        const command = validation.value;
+        // Connection checks wait seconds on the network; holding the queue would stall routing changes.
+        if (command.type === "diagnostics.run") return command;
+        return { ok: true as const, value: await this.dispatch(command) };
       } catch (error) {
-        return {
-          ok: false,
-          error: {
-            code: error instanceof Failure ? error.code : "internal",
-            message:
-              error instanceof Failure
-                ? error.message
-                : "Operation failed. Existing proxy settings were not deliberately disabled; inspect Chrome ownership and retry.",
-          },
-        };
+        return this.failure(error);
       }
-    });
-    this.tail = task;
-    return task;
+    }).then((result) => ("type" in result ? this.diagnose(result) : result));
   }
   client<C extends Command>(command: C): Promise<Response<CommandResult<C>>> {
     // execute validates both UI and development commands before using the typed contract.

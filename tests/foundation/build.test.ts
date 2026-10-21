@@ -8,8 +8,8 @@ test("manifest confines extension execution and network access", () => {
   expect(manifest.manifest_version).toBe(3);
   expect(manifest.minimum_chrome_version).toBe("102");
   expect(manifest.incognito).toBe("spanning");
-  expect(manifest.permissions).toEqual(["storage", "proxy"]);
-  expect(manifest.optional_permissions).toEqual(["privacy", "tabs"]);
+  expect(manifest.permissions).toEqual(["storage", "proxy", "activeTab"]);
+  expect(manifest.optional_permissions).toEqual(["privacy"]);
   expect(manifest.host_permissions).toEqual([
     "https://api.mullvad.net/*",
     "https://ipv4.am.i.mullvad.net/*",

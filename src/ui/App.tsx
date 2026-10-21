@@ -1,12 +1,16 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { engine } from "../core/engine";
 import { checked, relayName, host as validateHost } from "../core/validation";
 import type { Command, CommandResult } from "../shared/messages";
 import {
   type BrowserContext,
+  type Diagnostics,
   type ImportPreview,
   INTERNAL_DEFAULT_SERVER_ID,
+  type Server,
   type Snapshot,
 } from "../shared/state";
+import { proxyStatus, type Tone } from "../shared/status";
 import {
   checkStatus,
   client,
@@ -15,10 +19,8 @@ import {
   freshness,
   incognitoScopeDescription,
   type Observed,
-  proxyStatus,
   STALE_AFTER,
   searchServers,
-  type Tone,
 } from "./client";
 
 const isOptions = location.pathname.endsWith("options.html");
@@ -39,6 +41,108 @@ function Mark({ tone }: { tone: Tone }) {
     >
       <path d={icons[tone]} />
     </svg>
+  );
+}
+
+const unchecked = (status: "unknown" | "pending"): Diagnostics => ({
+  scope: "browser-route",
+  ipv4: { status },
+  ipv6: { status },
+  dns: { status },
+});
+async function loadChecks(context: BrowserContext): Promise<Diagnostics> {
+  try {
+    const response = await client({
+      type: "diagnostics.run",
+      checks: ["ipv4", "ipv6", "dns"],
+      context,
+    });
+    if (response.ok) return response.value.diagnostics;
+    throw new Error(response.error.message);
+  } catch (e) {
+    const failed = {
+      status: "error" as const,
+      message: e instanceof Error ? e.message : "The checks failed.",
+    };
+    return { scope: "browser-route", ipv4: failed, ipv6: failed, dns: failed };
+  }
+}
+
+function RelayRow({
+  server,
+  current,
+  favorite,
+  place = false,
+  missing = false,
+  busy,
+  onSelect,
+  onFavorite,
+}: {
+  server: Server;
+  current: boolean;
+  favorite: boolean;
+  place?: boolean;
+  missing?: boolean;
+  busy: boolean;
+  onSelect: () => void;
+  onFavorite?: () => void;
+}) {
+  const name = relayName(server.hostname);
+  return (
+    <div className="relay-row">
+      <button
+        type="button"
+        className={place ? "select place" : "select"}
+        disabled={busy || !server.online}
+        aria-current={current || undefined}
+        onClick={onSelect}
+      >
+        <span className="relay">
+          {place ? (
+            <>
+              {missing
+                ? "No longer listed"
+                : `${server.city}, ${server.country}`}
+              <small>{name}</small>
+            </>
+          ) : (
+            <>
+              <span className="sr-only">{server.city}, </span>
+              {name}
+            </>
+          )}
+        </span>
+        <span className="state">
+          {current ? (
+            <>
+              <Mark tone="on" /> In use
+            </>
+          ) : missing ? (
+            "Unavailable"
+          ) : server.online ? null : (
+            "Offline"
+          )}
+        </span>
+      </button>
+      {onFavorite ? (
+        <button
+          type="button"
+          className="star"
+          disabled={busy}
+          aria-pressed={favorite}
+          aria-label={
+            favorite
+              ? `Remove ${name} from favorites`
+              : `Add ${name} to favorites`
+          }
+          onClick={onFavorite}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3.6l2.6 5.3 5.8.8-4.2 4.1 1 5.8L12 16.9l-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z" />
+          </svg>
+        </button>
+      ) : null}
+    </div>
   );
 }
 
@@ -111,6 +215,16 @@ export function App({ context }: { context: BrowserContext }) {
   const [importText, setImportText] = useState("");
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [section, setSection] = useState("routing");
+  const [checks, setChecks] = useState(() => unchecked("unknown"));
+  const checkRun = useRef(0);
+  const runChecks = useCallback(() => {
+    const run = ++checkRun.current;
+    setChecks(unchecked("pending"));
+    void loadChecks(context).then((result) => {
+      // Results from a run started before a newer route change are stale.
+      if (run === checkRun.current) setChecks(result);
+    });
+  }, [context]);
 
   async function request<C extends Command>(
     command: C,
@@ -134,9 +248,11 @@ export function App({ context }: { context: BrowserContext }) {
   async function mutate(
     command: Exclude<
       Command,
-      { type: "settings.export" | "settings.import.preview" }
+      {
+        type: "settings.export" | "settings.import.preview" | "diagnostics.run";
+      }
     >,
-    reload = false,
+    routingChange = false,
   ) {
     const value = await request(command);
     if (value) {
@@ -144,20 +260,24 @@ export function App({ context }: { context: BrowserContext }) {
       setNotice(
         command.type === "snapshot"
           ? "Status refreshed."
-          : command.type === "diagnostics.run"
-            ? "Checks finished. Review the observations below."
-            : command.type === "servers.refresh"
-              ? "Server list updated."
+          : command.type === "servers.refresh"
+            ? "Server list updated."
+            : command.type === "favorite.set"
+              ? "Favorites updated."
               : "Settings updated.",
       );
-      if (reload && value.settings.preferences.autoReload && !isOptions) {
-        try {
-          const tab = await currentWebsiteTab(context);
-          await chrome.tabs.reload(tab.id);
-        } catch (error) {
-          setError(
-            `Settings saved, but the active website was not reloaded. ${error instanceof Error ? error.message : "Reload it manually."}`,
-          );
+      if (routingChange && !isOptions) {
+        // Confirm that traffic gets through the new route.
+        if (context === "regular") runChecks();
+        if (value.settings.preferences.autoReload) {
+          try {
+            const tab = await currentWebsiteTab(context);
+            await chrome.tabs.reload(tab.id);
+          } catch (error) {
+            setError(
+              `Settings saved, but the active website was not reloaded. ${error instanceof Error ? error.message : "Reload it manually."}`,
+            );
+          }
         }
       }
     }
@@ -185,6 +305,17 @@ export function App({ context }: { context: BrowserContext }) {
       active = false;
     };
   }, [context]);
+  useEffect(() => {
+    if (isOptions) return;
+    // Like upstream, the popup checks the connection as soon as it opens.
+    if (context === "regular") runChecks();
+    // Pages without an activeTab grant, such as chrome:// pages, have no current website.
+    currentWebsiteTab(context).then(
+      (tab) =>
+        setHost(new URL(tab.url).hostname.toLowerCase().replace(/\.$/, "")),
+      () => undefined,
+    );
+  }, [context, runChecks]);
 
   function openPicker(next: "global" | "site") {
     setTarget(next);
@@ -209,43 +340,6 @@ export function App({ context }: { context: BrowserContext }) {
       { type: "settings.update", patch: { randomMode: enabled } },
       true,
     );
-  }
-  async function activeSite() {
-    setError("");
-    try {
-      // Request optional permissions directly in the click handler, before any command.
-      if (!(await chrome.permissions.request({ permissions: ["tabs"] })))
-        throw new Error(
-          "Chrome denied tab access. Allow it to use the active website.",
-        );
-      const tab = await currentWebsiteTab(context);
-      const url = new URL(tab.url);
-      setHost(url.hostname.toLowerCase().replace(/\.$/, ""));
-      setTarget("site");
-    } catch (e) {
-      setError(
-        e instanceof Error ? e.message : "Cannot read the current website.",
-      );
-    }
-  }
-  async function setAutoReload(enabled: boolean) {
-    setError("");
-    try {
-      if (
-        enabled &&
-        !(await chrome.permissions.request({ permissions: ["tabs"] }))
-      )
-        throw new Error(
-          "Chrome denied tab access. Active-website reload was not enabled.",
-        );
-      await mutate({ type: "settings.update", patch: { autoReload: enabled } });
-    } catch (error) {
-      setError(
-        error instanceof Error
-          ? error.message
-          : "Cannot enable active-website reload.",
-      );
-    }
   }
   async function privacy(
     control: "webRtcNonProxiedUdp" | "networkPrediction",
@@ -324,7 +418,6 @@ export function App({ context }: { context: BrowserContext }) {
       ? `${server.city}, ${server.country} · ${relayName(server.hostname)}${server.online ? "" : " · Offline"}`
       : `Unavailable server: ${id}`;
   };
-  const selected = servers.find((s) => s.id === routing?.globalServerId);
   const canonical = checked(() => validateHost(host));
   const siteRule = canonical.ok
     ? routing?.rules.find((r) => r.host === canonical.value)
@@ -334,24 +427,105 @@ export function App({ context }: { context: BrowserContext }) {
   const matches = picker ? searchServers(servers, query) : [];
   const current =
     target === "site" ? siteRule?.serverId : routing?.globalServerId;
-  const status = snapshot
-    ? proxyStatus(
-        snapshot,
-        context,
-        selected
-          ? `${selected.city}, ${selected.country}`
-          : routing?.globalServerId === INTERNAL_DEFAULT_SERVER_ID
-            ? "the VPN-internal proxy"
-            : "an unavailable server",
-      )
-    : undefined;
-  const checks = snapshot
-    ? ([
-        ["IPv4", snapshot.diagnostics.ipv4],
-        ["IPv6", snapshot.diagnostics.ipv6],
-        ["DNS", snapshot.diagnostics.dns],
-      ] as const)
-    : [];
+  const status =
+    routing && effective ? proxyStatus(effective, routing, servers) : undefined;
+  const checkRows = [
+    ["IPv4", checks.ipv4],
+    ["IPv6", checks.ipv6],
+    ["DNS", checks.dns],
+  ] as const;
+  const checking = checks.ipv4.status === "pending";
+  const exits = [checks.ipv4, checks.ipv6].filter(
+    (state) => state.status === "ready",
+  );
+  // A failed IPv4 check means little when IPv6 got through.
+  const checkFailed =
+    !exits.length &&
+    ["error", "offline", "blocked"].includes(checks.ipv4.status);
+  // The check request follows the global route, so it tests the proxy only when that route is on.
+  const routeWarning = exits.some((state) => !state.value.isMullvad)
+    ? "Mullvad VPN isn't connected. Mullvad proxies only work through it."
+    : !checkFailed
+      ? ""
+      : routing?.enabled || routing?.randomMode
+        ? "The check couldn't get through the proxy. If websites don't load, make sure Mullvad VPN is connected or turn the proxy off."
+        : "The connection check failed. Make sure you're online and Mullvad VPN is connected.";
+  const siteRoute = (() => {
+    if (!routing || !canonical.ok) return "";
+    // The same engine builds the PAC, so this matches what the browser does.
+    // Local addresses bypass the proxy before random mode applies.
+    const route = engine.route(canonical.value, {
+      settings: routing,
+      servers,
+      sessionSeed: "preview",
+    });
+    if (route.kind === "direct" && route.reason === "local")
+      return "Local address. It always connects directly.";
+    if (routing.randomMode)
+      return "Gets a random location for this browser session.";
+    if (route.kind === "blocked")
+      return snapshot?.servers.status === "ready"
+        ? "Blocked until you choose an available location."
+        : "Load the server list to see where this website goes.";
+    if (route.kind === "direct")
+      return route.reason === "excluded"
+        ? "Excluded. It connects directly, without the proxy."
+        : "Connects directly. Choose a location to proxy only this website.";
+    const where = serverLabel(route.serverId);
+    return route.source === "exact"
+      ? `Uses its own location: ${where}.`
+      : route.source === "parent"
+        ? `Uses its parent domain's location: ${where}.`
+        : `Follows the global location: ${where}.`;
+  })();
+  const favorites = snapshot?.favorites ?? [];
+  // Favorites are shared with regular windows, so private popups show them read-only.
+  const toggleFavorite = (server: Server) =>
+    context === "regular"
+      ? () =>
+          mutate({
+            type: "favorite.set",
+            serverId: server.id,
+            favorite: !favorites.includes(server.id),
+          })
+      : undefined;
+  // Retired relays stay listed so their stars can still be removed.
+  const missingServer = (id: string): Server => ({
+    id,
+    hostname: id,
+    ipv4: "",
+    ipv6: "",
+    port: 0,
+    online: false,
+    country: "",
+    countryCode: "",
+    city: "",
+  });
+  const quickGroups = query.trim()
+    ? []
+    : [
+        {
+          label: "Favorites",
+          rows: favorites.map(
+            (id) =>
+              servers.find((server) => server.id === id) ?? missingServer(id),
+          ),
+        },
+        {
+          label: "Recent",
+          rows: (snapshot?.history ?? [])
+            .slice()
+            .sort((a, b) => b.lastUsedAt - a.lastUsedAt)
+            .flatMap((entry) =>
+              servers.filter(
+                (server) =>
+                  server.id === entry.serverId &&
+                  !favorites.includes(server.id),
+              ),
+            )
+            .slice(0, 3),
+        },
+      ].filter((group) => group.rows.length);
 
   const locationPicker =
     snapshot && picker ? (
@@ -394,6 +568,25 @@ export function App({ context }: { context: BrowserContext }) {
           </button>
         </div>
         <ul className="server-list">
+          {quickGroups.map((group) =>
+            group.rows.map((server, index) => (
+              <li key={`${group.label}-${server.id}`}>
+                {index === 0 ? (
+                  <h3 className="country">{group.label}</h3>
+                ) : null}
+                <RelayRow
+                  server={server}
+                  place
+                  missing={!servers.some((row) => row.id === server.id)}
+                  current={server.id === current}
+                  favorite={favorites.includes(server.id)}
+                  busy={busy}
+                  onSelect={() => select(server.id)}
+                  onFavorite={toggleFavorite(server)}
+                />
+              </li>
+            )),
+          )}
           {matches.map((server, index) => {
             const previous = matches[index - 1];
             const country = server.country !== previous?.country;
@@ -403,26 +596,14 @@ export function App({ context }: { context: BrowserContext }) {
                 {country || server.city !== previous?.city ? (
                   <h4 className="city">{server.city}</h4>
                 ) : null}
-                <button
-                  type="button"
-                  disabled={busy || !server.online}
-                  aria-current={server.id === current || undefined}
-                  onClick={() => select(server.id)}
-                >
-                  <span className="relay">
-                    <span className="sr-only">{server.city}, </span>
-                    {relayName(server.hostname)}
-                  </span>
-                  <span className="state">
-                    {server.id === current ? (
-                      <>
-                        <Mark tone="on" /> In use
-                      </>
-                    ) : server.online ? null : (
-                      "Offline"
-                    )}
-                  </span>
-                </button>
+                <RelayRow
+                  server={server}
+                  current={server.id === current}
+                  favorite={favorites.includes(server.id)}
+                  busy={busy}
+                  onSelect={() => select(server.id)}
+                  onFavorite={toggleFavorite(server)}
+                />
               </li>
             );
           })}
@@ -464,7 +645,6 @@ export function App({ context }: { context: BrowserContext }) {
             <path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9M12 3C9.5 5.6 8.2 8.6 8.2 12s1.3 6.4 3.8 9" />
           </svg>
           <h1>Mullvad Proxy</h1>
-          <span className="tag">Unofficial</span>
         </div>
         {context === "regular" ? settingsButton : null}
         {!isOptions && snapshot && status ? (
@@ -472,8 +652,8 @@ export function App({ context }: { context: BrowserContext }) {
             {(
               [
                 ["Proxy", status.tone, status.title],
-                ["VPN", ...exitStatus(snapshot)],
-                ["DNS", ...checkStatus(snapshot.diagnostics.dns)],
+                ["VPN", ...exitStatus(checks)],
+                ["DNS", ...checkStatus(checks.dns)],
               ] as const
             ).map(([name, tone, text]) => {
               // Connection checks observe browser requests, not the VPN tunnel itself.
@@ -538,6 +718,7 @@ export function App({ context }: { context: BrowserContext }) {
                   <strong>{status.title}</strong> {status.detail}
                 </span>
               </p>
+              {routeWarning ? <p className="notice">{routeWarning}</p> : null}
               {context === "incognito" ? (
                 <p className="hint">
                   {incognitoScopeDescription(snapshot.incognitoProxy)} Routing
@@ -660,26 +841,14 @@ export function App({ context }: { context: BrowserContext }) {
                             parent domain also covers its subdomains.
                           </p>
                         </>
-                      ) : (
-                        <button type="button" onClick={activeSite}>
-                          Use active website
-                        </button>
-                      )}
+                      ) : null}
                       {host ? (
                         <>
                           {!isOptions ? (
-                            <>
-                              <p className="hostname">{host}</p>
-                              <p className="meta">
-                                {excluded
-                                  ? routing.randomMode
-                                    ? "Exclusion saved but inactive while random mode is on"
-                                    : "Excluded when random mode is off"
-                                  : siteRule
-                                    ? `${siteRule.enabled ? "Enabled" : "Disabled"} rule · ${serverLabel(siteRule.serverId)}`
-                                    : "No exact website rule. Parent or global rules may apply."}
-                              </p>
-                            </>
+                            <p className="hostname">{host}</p>
+                          ) : null}
+                          {siteRoute ? (
+                            <p className="meta">{siteRoute}</p>
                           ) : null}
                           <div className="actions">
                             <button
@@ -721,7 +890,7 @@ export function App({ context }: { context: BrowserContext }) {
                         <p className="hint">
                           {isOptions
                             ? "Enter a domain above to choose its location or add an exclusion without visiting it."
-                            : "Allow optional tab access to configure the active website."}
+                            : "Open a website to choose a location for it or exclude it."}
                         </p>
                       )}
                     </div>
@@ -823,22 +992,25 @@ export function App({ context }: { context: BrowserContext }) {
               <section className="card">
                 <div className="card-head">
                   <h2>VPN & DNS check</h2>
-                  <button
-                    type="button"
-                    className="primary"
-                    disabled={busy}
-                    onClick={() =>
-                      mutate({
-                        type: "diagnostics.run",
-                        checks: ["ipv4", "ipv6", "dns"],
-                      })
-                    }
-                  >
-                    Run checks
-                  </button>
+                  {context === "regular" ? (
+                    <button
+                      type="button"
+                      className="ghost"
+                      disabled={checking}
+                      onClick={runChecks}
+                    >
+                      Check again
+                    </button>
+                  ) : null}
                 </div>
-                <ul className="checks">
-                  {checks.map(([name, state]) => {
+                {context === "incognito" ? (
+                  <p className="hint">
+                    Checks run in regular windows only. To check this private
+                    session, open mullvad.net/check in a private tab.
+                  </p>
+                ) : null}
+                <ul className="checks" hidden={context === "incognito"}>
+                  {checkRows.map(([name, state]) => {
                     const [tone, text] = checkStatus(state);
                     return (
                       <li key={name}>
@@ -849,14 +1021,14 @@ export function App({ context }: { context: BrowserContext }) {
                     );
                   })}
                 </ul>
-                <details>
+                <details hidden={context === "incognito"}>
                   <summary>Observations & check scope</summary>
                   <p className="hint">
                     Browser-route observations, not an active-tab check or proof
                     of DNS leak prevention. The browser proxy can affect these
                     results.
                   </p>
-                  {checks.map(([name, state]) => (
+                  {checkRows.map(([name, state]) => (
                     <Observation
                       key={name}
                       title={name === "DNS" ? "DNS resolvers" : name}
@@ -1134,7 +1306,12 @@ export function App({ context }: { context: BrowserContext }) {
                     <input
                       type="checkbox"
                       checked={snapshot.settings.preferences.autoReload}
-                      onChange={(e) => setAutoReload(e.target.checked)}
+                      onChange={(e) =>
+                        mutate({
+                          type: "settings.update",
+                          patch: { autoReload: e.target.checked },
+                        })
+                      }
                     />
                   </label>
                 </fieldset>
@@ -1172,17 +1349,13 @@ export function App({ context }: { context: BrowserContext }) {
           </>
         )}
       </main>
-      <footer>
-        {isOptions ? (
-          <>
-            Requires Mullvad VPN · GPL-3.0-or-later
-            <br />
-            Independent port. Not an official Mullvad product.
-          </>
-        ) : (
-          "Unofficial port · Requires Mullvad VPN · GPL-3.0-or-later"
-        )}
-      </footer>
+      {isOptions ? (
+        <footer>
+          Requires Mullvad VPN · GPL-3.0-or-later
+          <br />
+          Independent port. Not an official Mullvad product.
+        </footer>
+      ) : null}
     </div>
   );
 }

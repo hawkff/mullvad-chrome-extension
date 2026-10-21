@@ -244,10 +244,21 @@ function firefoxProxy(
     );
   return { enabled, serverId: id };
 }
+function favorites(value: unknown): string[] {
+  const result = array(value).map(string);
+  if (new Set(result).size !== result.length)
+    throw new Error("Duplicate favorite server");
+  return result;
+}
 // Saved intent and history outlive catalog membership; imports check availability separately.
 export function persisted(input: unknown): ImportPreview {
   const v = object(input);
-  keys(v, ["version", "settings", "history"]);
+  // Settings saved before favorites existed have no favorites field.
+  keys(
+    v,
+    ["version", "settings", "history", "favorites"],
+    ["version", "settings", "history"],
+  );
   if (v.version !== 1) throw new Error("Unsupported native settings version");
   const settings = object(v.settings);
   keys(settings, ["routing", "preferences"]);
@@ -256,6 +267,7 @@ export function persisted(input: unknown): ImportPreview {
     routing: routing(settings.routing),
     preferences: preferences(settings.preferences),
     history: history(v.history),
+    ...(v.favorites === undefined ? {} : { favorites: favorites(v.favorites) }),
   };
 }
 export function imported(
@@ -364,6 +376,14 @@ export function command(input: unknown): Command {
     case "history.remove":
       fields = ["serverId"];
       result = { type, serverId: string(v.serverId) };
+      break;
+    case "favorite.set":
+      fields = ["serverId", "favorite"];
+      result = {
+        type,
+        serverId: string(v.serverId),
+        favorite: boolean(v.favorite),
+      };
       break;
     case "privacy.set":
     case "privacy.restore": {
