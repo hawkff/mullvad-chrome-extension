@@ -157,6 +157,20 @@ test("App browser workflows, responsive layout and keyboard focus", async () => 
         "document.body.textContent.includes('Effective context: incognito')",
       ),
     ).toBe(true);
+    expect(
+      await evaluate(
+        "document.body.textContent.includes('Inherited regular routing')",
+      ),
+    ).toBe(true);
+    await evaluate("document.querySelector('input[type=checkbox]').click()");
+    await wait(
+      "document.body.textContent.includes('Private-session routing override')",
+    );
+    expect(
+      await evaluate(
+        "document.body.textContent.includes('last Incognito window closes')",
+      ),
+    ).toBe(true);
     await click("Import / export");
     await wait("!!document.querySelector('#import-json')");
     expect(
@@ -206,6 +220,17 @@ test("App browser workflows, responsive layout and keyboard focus", async () => 
         await evaluate("document.documentElement.scrollWidth <= innerWidth"),
       ).toBe(true);
     }
+    await cdp("Page.navigate", { url: `${server.url}popup.html?incognito` });
+    await wait("document.body.textContent.includes('Run checks')");
+    await click("Run checks");
+    await wait(
+      "document.querySelector('[role=alert]')?.textContent.includes('private-route fetch')",
+    );
+    expect(
+      await evaluate(
+        "document.body.textContent.includes('No regular observations were returned')",
+      ),
+    ).toBe(true);
     await cdp("Emulation.setEmulatedMedia", {
       features: [{ name: "prefers-reduced-motion", value: "reduce" }],
     });

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   freshness,
+  incognitoScopeDescription,
   isImportPreview,
   isSnapshot,
   searchServers,
@@ -92,4 +93,25 @@ test("freshness distinguishes unknown, blocked and stale data", () => {
   expect(
     freshness({ status: "ready", updatedAt: Date.now(), value: [] }),
   ).toContain("Fresh cached data");
+});
+
+test("Incognito scope labels distinguish inheritance, overrides and unknown state", () => {
+  const proxy = { ...fixture.incognitoProxy, applied: true };
+  expect(
+    incognitoScopeDescription({ ...proxy, settingScope: "regular" }),
+  ).toContain("Inherited regular routing");
+  expect(
+    incognitoScopeDescription({
+      ...proxy,
+      settingScope: "incognito_session_only",
+    }),
+  ).toContain("last Incognito window closes");
+  expect(incognitoScopeDescription(proxy)).toContain("has not confirmed");
+  expect(
+    incognitoScopeDescription({
+      ...proxy,
+      applied: false,
+      settingScope: "regular",
+    }),
+  ).not.toContain("Inherited");
 });

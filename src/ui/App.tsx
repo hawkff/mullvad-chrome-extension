@@ -8,7 +8,12 @@ import {
   type LoadState,
   type Snapshot,
 } from "../shared/state";
-import { client, freshness, searchServers } from "./client";
+import {
+  client,
+  freshness,
+  incognitoScopeDescription,
+  searchServers,
+} from "./client";
 
 const isOptions = location.pathname.endsWith("options.html");
 const context = chrome.extension.inIncognitoContext ? "incognito" : "regular";
@@ -324,6 +329,13 @@ export function App() {
               </strong>
               <p>{effective?.message || `Status: ${effective?.status}`}</p>
               <p className="hint">Effective context: {effective?.scope}</p>
+              {context === "incognito" ? (
+                <p className="hint">
+                  {incognitoScopeDescription(snapshot.incognitoProxy)} Routing
+                  changes made here apply to this private session and expire
+                  when the last Incognito window closes.
+                </p>
+              ) : null}
               <details open={isOptions || undefined}>
                 <summary>Scope, ownership & requirements</summary>
                 {!snapshot.incognitoAllowed ? (
@@ -937,7 +949,9 @@ export function App() {
                   Open the popup in an Incognito window to see effective
                   private-context ownership. Incognito diagnostics may be
                   blocked when Chrome cannot guarantee context-correct checks.
-                  Private activity stays session-only.
+                  Regular routing applies until you create a private-session
+                  override. Private routing changes and activity expire when the
+                  last Incognito window closes.
                 </p>
               </section>
             ) : null}

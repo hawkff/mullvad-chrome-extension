@@ -4,6 +4,16 @@ import { fixture } from "./fixture";
 import "../../src/ui/styles.css";
 
 const state = structuredClone(fixture);
+if (location.search.includes("incognito")) {
+  state.incognitoAllowed = true;
+  state.incognitoProxy = {
+    ...state.incognitoProxy,
+    ownership: "controlled_by_this_extension",
+    applied: true,
+    status: "ready",
+    settingScope: "regular",
+  };
+}
 Object.defineProperty(globalThis, "chrome", {
   value: {
     extension: { inIncognitoContext: location.search.includes("incognito") },
@@ -18,8 +28,20 @@ Object.defineProperty(globalThis, "chrome", {
       }) => {
         state.context =
           command.context === "incognito" ? "incognito" : "regular";
-        if (command.type === "settings.update")
+        if (command.type === "settings.update") {
           Object.assign(state.settings.routing, command.patch);
+          if (state.context === "incognito")
+            state.incognitoProxy.settingScope = "incognito_session_only";
+        }
+        if (command.type === "diagnostics.run" && state.context === "incognito")
+          return {
+            ok: false,
+            error: {
+              code: "blocked",
+              message:
+                "Chrome cannot guarantee a private-route fetch from this spanning worker. No regular observations were returned.",
+            },
+          };
         if (
           command.type === "settings.import.preview" &&
           typeof command.data === "object" &&

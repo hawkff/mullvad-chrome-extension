@@ -1,5 +1,5 @@
 import type { Command, CommandResult, Response } from "../shared/messages";
-import type { LoadState, Server } from "../shared/state";
+import type { LoadState, ProxyStatus, Server } from "../shared/state";
 
 type Check = (value: unknown) => boolean;
 const text: Check = (v) => typeof v === "string";
@@ -212,4 +212,20 @@ export function freshness(state: LoadState<unknown>): string {
   return "message" in state
     ? `${state.status}: ${state.message}`
     : "Not checked";
+}
+
+export function incognitoScopeDescription(proxy: ProxyStatus): string {
+  if (!proxy.applied) return "Effective private routing is not confirmed.";
+  switch (proxy.settingScope) {
+    case "regular":
+      return "Inherited regular routing. No private-session override is applied.";
+    case "incognito_session_only":
+      return "Private-session routing override. It expires when the last Incognito window closes.";
+    case "regular_only":
+      return "The regular-only setting does not apply in Incognito.";
+    case "incognito_persistent":
+      return "Chrome reports a persistent Incognito setting.";
+    default:
+      return "Chrome has not confirmed whether private routing inherits regular settings or uses an override.";
+  }
 }
