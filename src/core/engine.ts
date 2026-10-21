@@ -47,7 +47,7 @@ export function createEngine(domainOf: (host: string) => string | null) {
     if (
       !host
         .split(".")
-        .every((s) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(s))
+        .every((s) => /^[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?$/.test(s))
     )
       return null;
     return host;

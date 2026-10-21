@@ -482,3 +482,108 @@ test("persisted validation preserves unavailable IDs but rejects malformed state
     }).ok,
   ).toBe(false);
 });
+
+describe("underscore DNS host compatibility", () => {
+  test("canonical host and command validation accept underscores within existing bounds", () => {
+    const longest = `${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(63)}.${"_".repeat(61)}`;
+    for (const host of [
+      "UNDER_score.COM.",
+      "_service.example.com",
+      "node_.example.com",
+      "_.example.com",
+      `${"_".repeat(63)}.com`,
+      longest,
+    ]) {
+      const canonical = host.toLowerCase().replace(/\.$/, "");
+      expect(canonicalHost(host)).toEqual({ ok: true, value: canonical });
+      expect(
+        validateCommand({
+          type: "rule.upsert",
+          rule: { host, enabled: true, serverId: id },
+        }),
+      ).toMatchObject({ ok: true, value: { rule: { host: canonical } } });
+    }
+  });
+  test("explicit, parent, global, excluded and unmatched decisions agree with generated PAC", () => {
+    const ctx = context();
+    ctx.settings.rules = [
+      {
+        host: "api_service.example.com",
+        enabled: true,
+        serverId: "internal-default",
+      },
+      { host: "under_score.com", enabled: true, serverId: "internal-default" },
+    ];
+    ctx.settings.exclusions = ["excluded_host.example.com"];
+    const cases = [
+      ["api_service.example.com", { kind: "proxy", source: "exact" }],
+      ["child_service.under_score.com", { kind: "proxy", source: "parent" }],
+      ["global_host.example.net", { kind: "proxy", source: "global" }],
+      ["excluded_host.example.com", { kind: "direct", reason: "excluded" }],
+    ] as const;
+    const preview = validateImport(
+      {
+        version: 1,
+        settings: {
+          routing: ctx.settings,
+          preferences: { autoReload: false, historyEnabled: true },
+        },
+        history: [],
+      },
+      servers,
+    );
+    expect(preview.ok).toBe(true);
+    for (const [host, decision] of cases)
+      expect(resolveRoute(host, ctx)).toMatchObject(decision);
+    check(
+      ctx,
+      cases.map(([host]) => host),
+    );
+    ctx.settings.enabled = false;
+    expect(resolveRoute("unmatched_host.example.net", ctx)).toEqual({
+      kind: "direct",
+      reason: "unmatched",
+    });
+    check(ctx, [
+      "unmatched_host.example.net",
+      "api_service.example.com",
+      "child_service.under_score.com",
+    ]);
+  });
+  test("underscores do not admit URL syntax, injection, invalid labels or ambiguous IPs", () => {
+    const ctx = context();
+    const invalid = [
+      "https://under_score.com",
+      "user@under_score.com",
+      "under_score.com/path",
+      "under_score.com?query",
+      "under_score.com#hash",
+      "under_score.com:443",
+      "under%5fscore.com",
+      "under_score.com\\path",
+      " under_score.com",
+      "under_score.com\n",
+      'under_score.com";throw 1;//',
+      "under_score..com",
+      "-under_score.com",
+      "under_score-.com",
+      `${"_".repeat(64)}.com`,
+      `${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(63)}.${"_".repeat(62)}`,
+      "127.1",
+      "999.1.1.1",
+      "[::1%eth0]",
+    ];
+    for (const host of invalid) {
+      expect(canonicalHost(host).ok).toBe(false);
+      expect(
+        validateCommand({ type: "exclusion.set", host, excluded: true }).ok,
+      ).toBe(false);
+      expect(resolveRoute(host, ctx).kind).toBe("blocked");
+    }
+    check(ctx, invalid);
+    expect(canonicalHost("192.168.1.2")).toEqual({
+      ok: true,
+      value: "192.168.1.2",
+    });
+  });
+});
