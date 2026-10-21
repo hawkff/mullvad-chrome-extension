@@ -109,7 +109,7 @@ test("App browser workflows, responsive layout and keyboard focus", async () => 
     await wait("document.body.textContent.includes('Browser proxy')");
     expect(
       await evaluate(
-        "document.body.textContent.includes('Proxy configuration not confirmed')",
+        "document.body.textContent.includes('Proxy configuration applied')",
       ),
     ).toBe(true);
     expect(
@@ -149,6 +149,30 @@ test("App browser workflows, responsive layout and keyboard focus", async () => 
     expect(await evaluate("document.activeElement !== document.body")).toBe(
       true,
     );
+    expect(
+      await evaluate(
+        "document.body.textContent.includes('PRIVATE_STATUS_NOT_INSPECTED')",
+      ),
+    ).toBe(false);
+    expect(
+      await evaluate(
+        "document.body.textContent.includes('Effective private routing is not confirmed')",
+      ),
+    ).toBe(false);
+    await cdp("Page.navigate", { url: `${server.url}options.html` });
+    await wait(
+      "document.body.textContent.includes('This regular page does not inspect or monitor private routing')",
+    );
+    expect(
+      await evaluate(
+        "document.body.textContent.includes('Proxy configuration applied')",
+      ),
+    ).toBe(true);
+    expect(
+      await evaluate(
+        "document.body.textContent.includes('PRIVATE_STATUS_NOT_INSPECTED')",
+      ),
+    ).toBe(false);
     await cdp("Page.navigate", { url: `${server.url}options.html?incognito` });
     await wait("document.body.textContent.includes('Incognito window')");
     await wait("document.body.textContent.includes('Browser proxy')");

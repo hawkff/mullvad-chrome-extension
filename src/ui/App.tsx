@@ -945,6 +945,12 @@ export function App() {
                   . Open Chrome → Extensions → Manage extensions → this
                   extension → Allow in Incognito to opt in.
                 </p>
+                {context === "regular" ? (
+                  <p>
+                    This regular page does not inspect or monitor private
+                    routing.
+                  </p>
+                ) : null}
                 <p>
                   Open the popup in an Incognito window to see effective
                   private-context ownership. Incognito diagnostics may be

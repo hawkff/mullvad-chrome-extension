@@ -4,6 +4,14 @@ import { fixture } from "./fixture";
 import "../../src/ui/styles.css";
 
 const state = structuredClone(fixture);
+state.proxy = {
+  ...state.proxy,
+  applied: true,
+  status: "ready",
+  ownership: "controlled_by_this_extension",
+  settingScope: "regular",
+};
+state.incognitoProxy.message = "PRIVATE_STATUS_NOT_INSPECTED";
 if (location.search.includes("incognito")) {
   state.incognitoAllowed = true;
   state.incognitoProxy = {
@@ -12,6 +20,7 @@ if (location.search.includes("incognito")) {
     applied: true,
     status: "ready",
     settingScope: "regular",
+    message: "Private routing inherited",
   };
 }
 Object.defineProperty(globalThis, "chrome", {
