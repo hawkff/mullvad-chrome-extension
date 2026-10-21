@@ -18,16 +18,27 @@ async function connect(url) {
   const socket = new WebSocket(url);
   await new Promise((resolve, reject) => {
     socket.onopen = resolve;
-    socket.onerror = reject;
+    socket.onclose = () => reject(Error("CDP connection closed"));
+    socket.onerror = () => {
+      socket.close();
+      reject(Error("CDP connection failed"));
+    };
   });
   let id = 0;
   const pending = new Map();
+  socket.onclose = () => {
+    for (const resolve of pending.values())
+      resolve({ error: { message: "CDP connection closed" } });
+    pending.clear();
+  };
   socket.onmessage = (event) => {
     const message = JSON.parse(event.data);
     pending.get(message.id)?.(message);
     pending.delete(message.id);
   };
   const send = async (method, params = {}) => {
+    if (socket.readyState !== WebSocket.OPEN)
+      throw Error("CDP connection closed");
     let timer;
     const current = ++id;
     try {
@@ -127,12 +138,20 @@ async function launch(extension, flags = [], display) {
     };
     const page = async (url) => {
       const { targetId } = await browser("Target.createTarget", { url });
-      const cdp = await attach(targetId);
-      await waitFor(
-        () => evaluate(cdp, "document.readyState === 'complete'"),
-        "page ready",
-      );
-      return cdp;
+      let cdp;
+      try {
+        cdp = await attach(targetId);
+        await waitFor(
+          () => evaluate(cdp, "document.readyState === 'complete'"),
+          "page ready",
+        );
+        return cdp;
+      } catch (error) {
+        cdp?.close();
+        // Reload may already have removed this target; preserve the readiness error.
+        await browser("Target.closeTarget", { targetId }).catch(() => {});
+        throw error;
+      }
     };
     return {
       browser,
@@ -160,6 +179,48 @@ const message = (page, command) =>
 const local = (page) => evaluate(page, "chrome.storage.local.get(null)");
 const session = (page) =>
   evaluate(page, "chrome.storage.session.get('session.v1')");
+
+async function incognitoOptions(chrome, extensions, id, previous) {
+  previous.close();
+  await waitFor(
+    () =>
+      evaluate(
+        extensions,
+        `new Promise(r=>chrome.developerPrivate.getExtensionInfo(${JSON.stringify(id)},info=>r(Boolean(info?.incognitoAccess?.isActive))))`,
+      ),
+    "Incognito configuration enabled",
+  );
+  let page;
+  try {
+    return await waitFor(async () => {
+      try {
+        page ??= await chrome.page(`chrome-extension://${id}/options.html`);
+        if (!(await evaluate(page, "Boolean(globalThis.chrome?.runtime?.id)")))
+          throw Error("Extension context not ready");
+        const snapshot = await message(page, { type: "snapshot" });
+        if (snapshot && !snapshot.ok)
+          throw Error(
+            `Incognito readiness snapshot rejected: ${snapshot.error.code}`,
+          );
+        return snapshot?.value?.incognitoAllowed && page;
+      } catch (error) {
+        page?.close();
+        page = undefined;
+        // Only transport/context loss during reload is retryable here.
+        if (
+          !/CDP connection (?:failed|closed)|WebSocket.*(?:not open|closed|closing)|Execution context was destroyed|Cannot find context with specified id|Inspected target navigated or closed|No target with given id|Extension context (?:invalidated|not ready)|Could not establish connection|message port closed|message channel closed/i.test(
+            String(error),
+          )
+        )
+          throw error;
+        return false;
+      }
+    }, "Incognito options page and snapshot after reload");
+  } catch (error) {
+    page?.close();
+    throw error;
+  }
+}
 
 test("real extension Incognito messages, session expiry and worker restart", async () => {
   const chrome = await launch(resolve("dist/development"));
@@ -190,14 +251,7 @@ test("real extension Incognito messages, session expiry and worker restart", asy
       extensions,
       `chrome.developerPrivate.updateExtensionConfiguration({extensionId:${JSON.stringify(id)},incognitoAccess:true},()=>{});true`,
     );
-    // Opt-in reloads the extension. A newly created page wakes the replacement worker.
-    await Bun.sleep(500);
-    regular = await chrome.page(`chrome-extension://${id}/options.html`);
-    await waitFor(
-      async () =>
-        (await message(regular, { type: "snapshot" })).value?.incognitoAllowed,
-      "Incognito opt-in",
-    );
+    regular = await incognitoOptions(chrome, extensions, id, regular);
     const createPrivate = async (existing) => {
       const old = new Set((await chrome.targets()).map((target) => target.id));
       const window =
@@ -1090,8 +1144,7 @@ test("actual optional permission grants and revocation", async () => {
       extensions,
       `chrome.developerPrivate.updateExtensionConfiguration({extensionId:${JSON.stringify(id)},incognitoAccess:true},()=>{});true`,
     );
-    await Bun.sleep(500);
-    page = await chrome.page(`chrome-extension://${id}/options.html`);
+    page = await incognitoOptions(chrome, extensions, id, page);
     const grantPending = page("Runtime.evaluate", {
       expression:
         "chrome.permissions.request({permissions:['privacy','tabs']})",
