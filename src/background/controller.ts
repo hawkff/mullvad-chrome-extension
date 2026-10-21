@@ -446,11 +446,14 @@ export class Controller {
         ),
       ),
     ]);
+    const settings = structuredClone(state.settings);
+    settings.preferences.autoReload =
+      this.state.settings.preferences.autoReload;
     return {
       context,
       incognitoAllowed: await this.allowed(),
       revision: state.revision,
-      settings: structuredClone(state.settings),
+      settings,
       history: context === "incognito" ? [] : structuredClone(state.history),
       servers: structuredClone(this.servers),
       proxy,
@@ -552,6 +555,9 @@ export class Controller {
         ? (this.session.privateState ?? this.state)
         : this.state;
     const next = structuredClone(state);
+    // Private records keep the settings shape; reload behavior always comes from regular settings.
+    next.settings.preferences.autoReload =
+      this.state.settings.preferences.autoReload;
     next.revision++;
     const routing = next.settings.routing;
     const host = (input: string): string => {
@@ -572,24 +578,28 @@ export class Controller {
       case "settings.export":
         return {
           version: 1,
-          settings: structuredClone(state.settings),
+          settings: structuredClone(next.settings),
           history:
             context === "incognito" ? [] : structuredClone(state.history),
         };
-      case "settings.import.preview": {
-        const preview = this.routingCore.validateImport(
-          command.data,
-          this.catalog(),
-        );
-        if (!preview.ok) throw new Failure("invalid-input", preview.error);
-        return preview.value;
-      }
+      case "settings.import.preview":
       case "settings.import": {
         const preview = this.routingCore.validateImport(
           command.data,
           this.catalog(),
         );
         if (!preview.ok) throw new Failure("invalid-input", preview.error);
+        if (
+          context === "incognito" &&
+          preview.value.preferences &&
+          preview.value.preferences.autoReload !==
+            this.state.settings.preferences.autoReload
+        )
+          throw new Failure(
+            "blocked",
+            "Auto-reload is shared with regular settings. Change it there before importing private settings.",
+          );
+        if (command.type === "settings.import.preview") return preview.value;
         next.settings.routing = { ...routing, ...preview.value.routing };
         if (preview.value.preferences)
           next.settings.preferences = preview.value.preferences;
@@ -606,8 +616,17 @@ export class Controller {
             routing.globalServerId = INTERNAL_DEFAULT_SERVER_ID;
         }
         if (randomMode !== undefined) routing.randomMode = randomMode;
-        if (autoReload !== undefined)
+        if (autoReload !== undefined) {
+          if (
+            context === "incognito" &&
+            autoReload !== this.state.settings.preferences.autoReload
+          )
+            throw new Failure(
+              "blocked",
+              "Auto-reload is shared. Change it from regular settings.",
+            );
           next.settings.preferences.autoReload = autoReload;
+        }
         if (historyEnabled !== undefined)
           next.settings.preferences.historyEnabled = historyEnabled;
         break;

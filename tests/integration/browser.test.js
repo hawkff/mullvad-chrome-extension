@@ -530,6 +530,151 @@ test("real extension Incognito messages, session expiry and worker restart", asy
       serverId: "internal-default",
       enabled: true,
     });
+    await setDomain("Example.com.");
+    await click("Choose site location");
+    await waitFor(
+      () =>
+        evaluate(regular, "Boolean(document.querySelector('#server-search'))"),
+      "variant-domain picker",
+    );
+    await click("Use VPN-internal default");
+    await waitFor(
+      () => evaluate(regular, "!document.querySelector('#server-search')"),
+      "canonical rule created",
+    );
+    expect(
+      (
+        await message(regular, { type: "snapshot" })
+      ).value.settings.routing.rules.some(
+        (rule) => rule.host === "example.com",
+      ),
+    ).toBe(true);
+    await setDomain("EXAMPLE.COM.");
+    expect(
+      await evaluate(
+        regular,
+        "document.querySelector('#website-domain').value",
+      ),
+    ).toBe("EXAMPLE.COM.");
+    await waitFor(
+      () =>
+        evaluate(
+          regular,
+          "Array.from(document.querySelectorAll('button')).some(b=>b.textContent.trim()==='Reset site rule')",
+        ),
+      "canonical existing rule controls before mutation",
+    );
+    if (Bun.env.BROWSER_EVIDENCE_DIR) {
+      await mkdir(Bun.env.BROWSER_EVIDENCE_DIR, { recursive: true });
+      await regular("Emulation.setDeviceMetricsOverride", {
+        width: 800,
+        height: 850,
+        deviceScaleFactor: 1,
+        mobile: false,
+      });
+      await evaluate(
+        regular,
+        "document.querySelector('label[for=website-domain]').scrollIntoView({block:'start'})",
+      );
+      const image = await regular("Page.captureScreenshot", { format: "png" });
+      await writeFile(
+        join(Bun.env.BROWSER_EVIDENCE_DIR, "canonical-domain-controls.png"),
+        Buffer.from(image.data, "base64"),
+      );
+    }
+    await click("Reset site rule");
+    await waitFor(
+      () =>
+        evaluate(
+          regular,
+          "!Array.from(document.querySelectorAll('button')).some(b=>b.textContent.trim()==='Reset site rule')",
+        ),
+      "canonical rule removed",
+    );
+    for (const [saved, variant] of [
+      ["example.com", "Example.com."],
+      ["xn--bcher-kva.de", "BÜCHER.de."],
+    ]) {
+      expect(
+        (
+          await message(regular, {
+            type: "exclusion.set",
+            host: saved,
+            excluded: true,
+          })
+        ).ok,
+      ).toBe(true);
+      await click("Refresh status");
+      await waitFor(
+        () =>
+          evaluate(
+            regular,
+            "document.body.innerText.includes('Status refreshed.')",
+          ),
+        "saved exclusion refreshed",
+      );
+      await setDomain(variant);
+      expect(
+        await evaluate(
+          regular,
+          "document.querySelector('#website-domain').value",
+        ),
+      ).toBe(variant);
+      await waitFor(
+        () =>
+          evaluate(
+            regular,
+            "Array.from(document.querySelectorAll('button')).filter(b=>b.textContent.trim()==='Remove exclusion').length > 1",
+          ),
+        "canonical exclusion lookup before mutation",
+      );
+      await click("Remove exclusion");
+      expect(
+        (await message(regular, { type: "snapshot" })).value.settings.routing
+          .exclusions,
+      ).not.toContain(saved);
+    }
+    await message(regular, {
+      type: "rule.upsert",
+      rule: {
+        host: "example.com",
+        enabled: true,
+        serverId: "internal-default",
+      },
+    });
+    await message(regular, {
+      type: "exclusion.set",
+      host: "example.com",
+      excluded: true,
+    });
+    await click("Refresh status");
+    await waitFor(
+      () =>
+        evaluate(
+          regular,
+          "document.body.innerText.includes('Status refreshed.')",
+        ),
+      "entries refreshed before invalid input",
+    );
+    await setDomain("https://example.com/");
+    expect(
+      await evaluate(
+        regular,
+        "Array.from(document.querySelectorAll('button')).some(b=>b.textContent.trim()==='Reset site rule')",
+      ),
+    ).toBe(false);
+    expect(
+      await evaluate(
+        regular,
+        "Array.from(document.querySelectorAll('button')).some(b=>b.textContent.trim()==='Add exclusion')",
+      ),
+    ).toBe(true);
+    await message(regular, { type: "rule.remove", host: "example.com" });
+    await message(regular, {
+      type: "exclusion.set",
+      host: "example.com",
+      excluded: false,
+    });
     await setDomain("excluded.example.co.uk");
     await click("Add exclusion");
     await waitFor(
@@ -935,7 +1080,18 @@ test("actual optional permission grants and revocation", async () => {
       "permission worker",
     );
     const id = new URL(worker.url).host;
-    const page = await chrome.page(`chrome-extension://${id}/options.html`);
+    let page = await chrome.page(`chrome-extension://${id}/options.html`);
+    const extensions = await chrome.page("chrome://extensions/");
+    await evaluate(
+      extensions,
+      "chrome.developerPrivate.updateProfileConfiguration({inDeveloperMode:true});true",
+    );
+    await evaluate(
+      extensions,
+      `chrome.developerPrivate.updateExtensionConfiguration({extensionId:${JSON.stringify(id)},incognitoAccess:true},()=>{});true`,
+    );
+    await Bun.sleep(500);
+    page = await chrome.page(`chrome-extension://${id}/options.html`);
     const grantPending = page("Runtime.evaluate", {
       expression:
         "chrome.permissions.request({permissions:['privacy','tabs']})",
@@ -1099,6 +1255,117 @@ test("actual optional permission grants and revocation", async () => {
     );
     await Bun.sleep(200);
     expect(reloadHits).toBe(3);
+    const privateOld = new Set(
+      (await chrome.targets()).map((target) => target.id),
+    );
+    const privateWindow = await evaluate(
+      page,
+      `chrome.windows.create({incognito:true,url:${JSON.stringify(reloadUrl)}})`,
+    );
+    await waitFor(
+      () => reloadHits === 4,
+      "initial private controlled website load",
+    );
+    await evaluate(
+      page,
+      `chrome.action.openPopup({windowId:${privateWindow.id}})`,
+    );
+    const privateTarget = await waitFor(
+      async () =>
+        (await chrome.targets()).find(
+          (target) =>
+            target.url.endsWith("/popup.html") && !privateOld.has(target.id),
+        ),
+      "shared-preference private popup",
+    );
+    const privatePopup = await chrome.attach(privateTarget.id);
+    await waitFor(
+      () =>
+        evaluate(
+          privatePopup,
+          "Boolean(document.querySelector('input[type=checkbox]'))",
+        ),
+      "private popup ready",
+    );
+    expect(
+      await evaluate(
+        privatePopup,
+        "new Promise(r=>chrome.windows.getCurrent({},w=>r(w.incognito)))",
+      ),
+    ).toBe(true);
+    expect(
+      (
+        await message(privatePopup, {
+          type: "settings.update",
+          context: "incognito",
+          patch: { enabled: false },
+        })
+      ).ok,
+    ).toBe(true);
+    await evaluate(
+      privatePopup,
+      "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='Refresh status').click()",
+    );
+    await waitFor(
+      () =>
+        evaluate(
+          privatePopup,
+          "document.body.innerText.includes('Status refreshed.')",
+        ),
+      "private override reflected in UI",
+    );
+    await message(page, {
+      type: "settings.update",
+      patch: { autoReload: false },
+    });
+    expect(
+      (await message(privatePopup, { type: "snapshot", context: "incognito" }))
+        .value.settings.preferences.autoReload,
+    ).toBe(false);
+    const sharedDisabledStorage = await local(page);
+    await evaluate(
+      privatePopup,
+      "document.querySelector('input[type=checkbox]').click()",
+    );
+    await waitFor(
+      () =>
+        evaluate(
+          privatePopup,
+          "document.body.innerText.includes('Settings updated.')",
+        ),
+      "private route with shared reload disabled",
+    );
+    await Bun.sleep(250);
+    expect(reloadHits).toBe(4);
+    expect(await local(page)).toEqual(sharedDisabledStorage);
+    await message(page, {
+      type: "settings.update",
+      patch: { autoReload: true },
+    });
+    const sharedEnabledStorage = await local(page);
+    await evaluate(
+      privatePopup,
+      "document.querySelector('input[type=checkbox]').click()",
+    );
+    await waitFor(
+      () => reloadHits === 5,
+      "private popup uses current shared enabled preference",
+    );
+    expect(await local(page)).toEqual(sharedEnabledStorage);
+    expect(
+      (
+        await message(privatePopup, {
+          type: "settings.export",
+          context: "incognito",
+        })
+      ).value.settings.preferences.autoReload,
+    ).toBe(true);
+    await evaluate(page, `chrome.windows.remove(${privateWindow.id})`);
+    await waitFor(
+      async () => !(await session(page))["session.v1"].privateState,
+      "shared-preference private override cleanup",
+    );
+    const afterPrivateHits = reloadHits;
     expect(
       await evaluate(
         page,
@@ -1148,7 +1415,7 @@ test("actual optional permission grants and revocation", async () => {
         ),
       "visible revoked-permission reload failure",
     );
-    expect(reloadHits).toBe(3);
+    expect(reloadHits).toBe(afterPrivateHits);
     if (Bun.env.BROWSER_EVIDENCE_DIR) {
       await mkdir(Bun.env.BROWSER_EVIDENCE_DIR, { recursive: true });
       const image = await revokedPopup("Page.captureScreenshot", {

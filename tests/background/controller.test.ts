@@ -861,3 +861,95 @@ describe("real-core persisted routing", () => {
     }
   });
 });
+
+test("private routing uses the current shared reload preference without private overrides", async () => {
+  const controller = new Controller();
+  expect(
+    (
+      await controller.client({
+        type: "server.select",
+        serverId: "internal-default",
+        context: "incognito",
+      })
+    ).ok,
+  ).toBe(true);
+  for (const autoReload of [true, false]) {
+    expect(
+      (
+        await controller.client({
+          type: "settings.update",
+          patch: { autoReload },
+        })
+      ).ok,
+    ).toBe(true);
+    const regularStorage = structuredClone(local);
+    expect(
+      (await snapshot(controller, "incognito")).settings.preferences.autoReload,
+    ).toBe(autoReload);
+    const routed = await controller.client({
+      type: "settings.update",
+      patch: { enabled: false },
+      context: "incognito",
+    });
+    expect(routed.ok).toBe(true);
+    if (!routed.ok) throw new Error("Private routing failed");
+    expect(routed.value.settings.preferences.autoReload).toBe(autoReload);
+    expect(local).toEqual(regularStorage);
+    const exported = await controller.client({
+      type: "settings.export",
+      context: "incognito",
+    });
+    expect(exported.ok).toBe(true);
+    if (!exported.ok) throw new Error("Private export failed");
+    expect(exported.value.settings.preferences.autoReload).toBe(autoReload);
+    const conflict = structuredClone(exported.value);
+    conflict.settings.preferences.autoReload = !autoReload;
+    for (const type of [
+      "settings.import.preview",
+      "settings.import",
+    ] as const) {
+      const before = structuredClone({ local, session, privateProxy });
+      const response = await controller.client({
+        type,
+        context: "incognito",
+        data: conflict,
+      });
+      expect(response.ok).toBe(false);
+      if (response.ok) throw new Error("Conflicting import accepted");
+      expect(response.error.message).toContain("regular settings");
+      expect({ local, session, privateProxy }).toEqual(before);
+    }
+    expect(
+      (
+        await controller.client({
+          type: "settings.import",
+          context: "incognito",
+          data: exported.value,
+        })
+      ).ok,
+    ).toBe(true);
+    expect(local).toEqual(regularStorage);
+    expect(
+      (
+        await controller.client({
+          type: "settings.update",
+          context: "incognito",
+          patch: { autoReload: !autoReload },
+        })
+      ).ok,
+    ).toBe(false);
+    expect(
+      (await snapshot(controller, "incognito")).settings.preferences.autoReload,
+    ).toBe(autoReload);
+    expect(
+      (await snapshot(new Controller(), "incognito")).settings.preferences
+        .autoReload,
+    ).toBe(autoReload);
+  }
+  privateWindow = false;
+  privateProxy = undefined;
+  controller.privateWindowChanged();
+  await snapshot(controller);
+  expect(JSON.stringify(session)).not.toContain("privateState");
+  expect(JSON.stringify(session)).not.toContain("privateSeed");
+});

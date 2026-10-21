@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { checked, host as validateHost } from "../core/validation";
 import type { Command, CommandResult } from "../shared/messages";
 import {
   type BrowserContext,
@@ -264,8 +265,12 @@ export function App({ context }: { context: BrowserContext }) {
   const servers =
     snapshot?.servers.status === "ready" ? snapshot.servers.value : [];
   const selected = servers.find((s) => s.id === routing?.globalServerId);
-  const siteRule = routing?.rules.find((r) => r.host === host);
-  const excluded = routing?.exclusions.includes(host) ?? false;
+  const canonical = checked(() => validateHost(host));
+  const siteRule = canonical.ok
+    ? routing?.rules.find((r) => r.host === canonical.value)
+    : undefined;
+  const excluded =
+    canonical.ok && (routing?.exclusions.includes(canonical.value) ?? false);
   return (
     <div className={isOptions ? "app options" : "app popup"}>
       <header>
@@ -985,8 +990,9 @@ export function App({ context }: { context: BrowserContext }) {
                   </label>
                 </fieldset>
                 <p className="hint">
-                  Reloads only the active HTTP or HTTPS website in the popup's
-                  window. Options changes never reload a website.
+                  One preference for regular and Incognito popups. Reloads only
+                  the active HTTP or HTTPS website in the popup's window.
+                  Options changes never reload a website.
                 </p>
                 <p>
                   Incognito access:{" "}
