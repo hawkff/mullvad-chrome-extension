@@ -13,6 +13,20 @@ An unofficial Chrome Manifest V3 port of the [Mullvad browser extension](https:/
 
 Mullvad SOCKS5 servers require an existing Mullvad VPN connection. The extension does not create a VPN tunnel.
 
+## Screenshots
+
+<p align="center">
+  <img src="docs/screenshots/popup.png" width="32%" alt="Popup with the proxy on for all websites through Gothenburg, Sweden, except two website rules and one exclusion" />
+  <img src="docs/screenshots/locations.png" width="32%" alt="Location picker filtered to Swedish relays, with se-got-001 marked in use" />
+  <img src="docs/screenshots/connection-check.png" width="32%" alt="IPv4, IPv6 and DNS checks, each reporting Mullvad" />
+</p>
+<p align="center"><sub>The popup, the relay picker and the connection checks. The checks show example addresses.</sub></p>
+
+<p align="center">
+  <img src="docs/screenshots/options.png" width="75%" alt="Options page with the global route, three website rules and one exclusion" />
+</p>
+<p align="center"><sub>Routing settings, website rules and exclusions on the options page.</sub></p>
+
 ## Build and load
 
 Use Bun 1.4.3, as pinned in `package.json`.
