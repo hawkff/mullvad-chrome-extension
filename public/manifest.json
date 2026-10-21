@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Mullvad Proxy — Unofficial",
+  "version": "0.1.0",
+  "description": "Unofficial Mullvad VPN companion for Chrome. Requires an existing Mullvad VPN connection.",
+  "minimum_chrome_version": "102",
+  "background": { "service_worker": "background/index.js", "type": "module" },
+  "action": { "default_popup": "popup.html" },
+  "options_ui": { "page": "options.html", "open_in_tab": true },
+  "permissions": ["storage", "proxy"],
+  "optional_permissions": ["privacy", "tabs"],
+  "host_permissions": [
+    "https://api.mullvad.net/*",
+    "https://am.i.mullvad.net/*",
+    "https://ipv4.am.i.mullvad.net/*",
+    "https://ipv6.am.i.mullvad.net/*",
+    "https://*.dnsleak.am.i.mullvad.net/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  },
+  "incognito": "spanning"
+}

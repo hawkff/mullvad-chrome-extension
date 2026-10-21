@@ -1,0 +1,29 @@
+{
+  "name": "mullvad-chrome-extension",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "GPL-3.0-or-later",
+  "packageManager": "bun@1.4.3",
+  "scripts": {
+    "build": "bun scripts/build.ts",
+    "build:dev": "bun scripts/build.ts --development",
+    "check": "tsc-rs --noEmit -p tsconfig.json",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "tldts": "7.4.19"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.15",
+    "@types/bun": "1.4.3",
+    "@types/chrome": "0.3.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "tsc-rs": "0.7.0"
+  }
+}
