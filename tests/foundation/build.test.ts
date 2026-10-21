@@ -42,6 +42,20 @@ for (const development of [false, true]) {
     ]) {
       expect(await Bun.file(join(directory, file)).exists()).toBe(true);
     }
+    // Chrome refuses to load an extension whose declared icon file is missing.
+    for (const [size, file] of [
+      ...Object.entries(built.icons),
+      ...Object.entries(built.action.default_icon),
+    ]) {
+      // A PNG header stores width and height as big-endian integers at bytes 16 and 20.
+      const png = new DataView(
+        await Bun.file(join(directory, String(file))).arrayBuffer(),
+      );
+      expect([png.getUint32(16), png.getUint32(20)]).toEqual([
+        Number(size),
+        Number(size),
+      ]);
+    }
     const worker = await Bun.file(
       join(directory, built.background.service_worker),
     ).text();
