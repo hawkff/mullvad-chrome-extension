@@ -1,0 +1,31 @@
+{
+  "excludedHosts": ["Excluded.Example."],
+  "globalProxy": {
+    "type": "socks",
+    "host": "10.64.0.1",
+    "port": 1080,
+    "proxyDNS": true
+  },
+  "globalProxyDetails": {
+    "socksEnabled": true,
+    "proxyDNS": true
+  },
+  "hostProxies": {
+    "www.example.co.uk": {
+      "type": "socks",
+      "host": "185.213.154.69",
+      "port": 1080,
+      "proxyDNS": true
+    }
+  },
+  "hostProxiesDetails": {
+    "www.example.co.uk": {
+      "socksEnabled": true,
+      "server": "se-got-001",
+      "country": "Sweden",
+      "countryCode": "SE",
+      "city": "Gothenburg",
+      "proxyDNS": true
+    }
+  }
+}

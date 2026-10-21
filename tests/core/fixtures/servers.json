@@ -1,0 +1,17 @@
+[
+  {
+    "hostname": "se-got-wg-socks5-001.relays.mullvad.net",
+    "ipv4_address": "185.213.154.69",
+    "ipv6_address": "2a03:1b20:5:f011::a01f",
+    "port": 1080,
+    "online": true,
+    "location": {
+      "city": "Gothenburg",
+      "code": "se-got",
+      "country": "Sweden",
+      "countryCode": "SE",
+      "latitude": 57.71,
+      "longitude": 11.97
+    }
+  }
+]

@@ -6,29 +6,50 @@ import type {
   Server,
   ValidationResult,
 } from "../shared/state";
+import { createEngine, engine } from "./engine";
+import { publicSuffixSource } from "./public-suffix";
+import {
+  checked,
+  command,
+  host,
+  imported,
+  routing,
+  servers,
+} from "./validation";
 
-// Foundation signatures only; the routing implementation must replace these before release.
-export function canonicalHost(_input: string): ValidationResult<string> {
-  throw new Error("Routing implementation not installed");
+export function canonicalHost(input: string): ValidationResult<string> {
+  return checked(() => host(input));
 }
 export function resolveRoute(
-  _host: string,
-  _context: RoutingContext,
+  host: string,
+  context: RoutingContext,
 ): RouteDecision {
-  throw new Error("Routing implementation not installed");
+  const valid = checked(() => routing(context.settings, context.servers));
+  if (!valid.ok) return { kind: "blocked", reason: valid.error };
+  const canonical = canonicalHost(host);
+  if (!canonical.ok) return { kind: "blocked", reason: canonical.error };
+  return engine.route(canonical.value, { ...context, settings: valid.value });
 }
-export function generatePac(_context: RoutingContext): string {
-  throw new Error("Routing implementation not installed");
+export function generatePac(context: RoutingContext): string {
+  const valid = checked(() => routing(context.settings, context.servers));
+  // Services must apply this PAC with mandatory:true so runtime errors cannot fall back to DIRECT.
+  if (!valid.ok)
+    return 'function FindProxyForURL(){throw new Error("Invalid routing configuration");}';
+  const data = JSON.stringify({ ...context, settings: valid.value })
+    .replace(/</g, "\\u003c")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+  return `var exports=undefined,module=undefined;\n${publicSuffixSource}\nvar routingEngine=(${createEngine.toString()})(function(host){return tldts.getDomain(host);});\nvar routingContext=${data};\nfunction FindProxyForURL(url,host){var route=routingEngine.route(host,routingContext);if(route.kind==="direct")return "DIRECT";if(route.kind==="blocked")throw new Error("Routing blocked: "+route.reason);return "SOCKS5 "+route.endpoint.host+":"+route.endpoint.port;}`;
 }
-export function validateServers(_input: unknown): ValidationResult<Server[]> {
-  throw new Error("Routing implementation not installed");
+export function validateServers(input: unknown): ValidationResult<Server[]> {
+  return checked(() => servers(input));
 }
 export function validateImport(
-  _input: unknown,
-  _servers: readonly Server[],
+  input: unknown,
+  servers: readonly Server[],
 ): ValidationResult<ImportPreview> {
-  throw new Error("Routing implementation not installed");
+  return checked(() => imported(input, servers));
 }
-export function validateCommand(_input: unknown): ValidationResult<Command> {
-  throw new Error("Routing implementation not installed");
+export function validateCommand(input: unknown): ValidationResult<Command> {
+  return checked(() => command(input));
 }
