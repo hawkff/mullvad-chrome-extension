@@ -1,0 +1,72 @@
+import type { Snapshot } from "../../src/shared/state";
+export const fixture: Snapshot = {
+  context: "regular",
+  incognitoAllowed: false,
+  revision: 0,
+  settings: {
+    routing: {
+      enabled: false,
+      globalServerId: null,
+      randomMode: false,
+      rules: [],
+      exclusions: [],
+    },
+    preferences: { autoReload: false, historyEnabled: true },
+  },
+  servers: {
+    status: "ready",
+    updatedAt: Date.now(),
+    value: [
+      {
+        id: "se-got-001",
+        hostname: "se-got-001.example",
+        ipv4: "1.2.3.4",
+        ipv6: "::1",
+        port: 1080,
+        online: true,
+        country: "Sweden",
+        countryCode: "se",
+        city: "Gothenburg",
+      },
+      {
+        id: "de-ber-001",
+        hostname: "de-ber-001.example",
+        ipv4: "1.2.3.5",
+        ipv6: "::2",
+        port: 1080,
+        online: false,
+        country: "Germany",
+        countryCode: "de",
+        city: "Berlin",
+      },
+    ],
+  },
+  proxy: {
+    ownership: "unknown",
+    applied: false,
+    permissionGranted: true,
+    scope: "regular",
+    settingScope: "unknown",
+    status: "unknown",
+  },
+  incognitoProxy: {
+    ownership: "unknown",
+    applied: false,
+    permissionGranted: true,
+    scope: "incognito",
+    settingScope: "unknown",
+    status: "unknown",
+  },
+  privacy: {
+    permissionGranted: false,
+    webRtc: { ownership: "unknown", value: null },
+    networkPrediction: { ownership: "unknown", value: null },
+  },
+  diagnostics: {
+    scope: "browser-route",
+    ipv4: { status: "unknown" },
+    ipv6: { status: "unknown" },
+    dns: { status: "unknown" },
+  },
+  history: [],
+};
