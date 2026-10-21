@@ -473,6 +473,141 @@ test("real extension Incognito messages, session expiry and worker restart", asy
       }
     }, "actual export file download");
     expect(download).toEqual(stable.value);
+    await evaluate(
+      regular,
+      "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='Routing').click()",
+    );
+    await waitFor(
+      () =>
+        evaluate(regular, "Boolean(document.querySelector('#website-domain'))"),
+      "manual domain entry",
+    );
+    const setDomain = (domain) =>
+      evaluate(
+        regular,
+        `(()=>{const input=document.querySelector('#website-domain');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,${JSON.stringify(domain)});input.dispatchEvent(new Event('input',{bubbles:true}));})()`,
+      );
+    const click = (text) =>
+      evaluate(
+        regular,
+        `Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()===${JSON.stringify(text)}).click()`,
+      );
+    await setDomain("https://example.co.uk/path");
+    await click("Choose site location");
+    await waitFor(
+      () =>
+        evaluate(regular, "Boolean(document.querySelector('#server-search'))"),
+      "manual-domain location picker",
+    );
+    await click("Use VPN-internal default");
+    await waitFor(
+      () =>
+        evaluate(
+          regular,
+          "document.querySelector('[role=alert]')?.textContent.includes('invalid-input')",
+        ),
+      "authoritative invalid host error",
+    );
+    expect(await message(regular, { type: "settings.export" })).toEqual(stable);
+    await setDomain("example.co.uk");
+    await click("Use VPN-internal default");
+    await waitFor(
+      () => evaluate(regular, "!document.querySelector('#server-search')"),
+      "manual parent rule saved",
+    );
+    const manual = await message(regular, { type: "snapshot" });
+    expect(manual.value.settings.routing.rules).toContainEqual({
+      host: "example.co.uk",
+      serverId: "internal-default",
+      enabled: true,
+    });
+    await setDomain("excluded.example.co.uk");
+    await click("Add exclusion");
+    await waitFor(
+      () =>
+        evaluate(
+          regular,
+          "document.querySelector('.rule') && document.body.innerText.includes('Inactive while random mode is on')",
+        ),
+      "inactive saved exclusion warning",
+    );
+    expect(
+      (await message(regular, { type: "snapshot" })).value.settings.routing
+        .exclusions,
+    ).toContain("excluded.example.co.uk");
+    expect(
+      await evaluate(
+        regular,
+        "document.body.innerText.includes('Random mode overrides global and website selections and all exclusions')",
+      ),
+    ).toBe(true);
+    expect(
+      await evaluate(
+        regular,
+        "document.body.innerText.includes('Saved exclusions are inactive')",
+      ),
+    ).toBe(true);
+    const toggleRandom = () =>
+      evaluate(
+        regular,
+        "Array.from(document.querySelectorAll('label')).find(label=>label.textContent.trim()==='Random mode').querySelector('input').click()",
+      );
+    await toggleRandom();
+    await waitFor(
+      () =>
+        evaluate(
+          regular,
+          "document.body.innerText.includes('Direct while random mode is off')",
+        ),
+      "exclusion active without random mode",
+    );
+    expect(
+      await evaluate(
+        regular,
+        "document.body.innerText.includes('Inactive while random mode is on')",
+      ),
+    ).toBe(false);
+    await toggleRandom();
+    await waitFor(
+      () =>
+        evaluate(
+          regular,
+          "document.body.innerText.includes('Saved exclusions are inactive')",
+        ),
+      "random override restored",
+    );
+    expect(
+      (await chrome.targets())
+        .filter((target) => target.type === "page")
+        .every((target) => !target.url.startsWith("https://example.co.uk")),
+    ).toBe(true);
+    if (Bun.env.BROWSER_EVIDENCE_DIR) {
+      for (const width of [360, 800]) {
+        await regular("Emulation.setDeviceMetricsOverride", {
+          width,
+          height: 850,
+          deviceScaleFactor: 1,
+          mobile: false,
+        });
+        await evaluate(
+          regular,
+          "document.querySelector('label[for=website-domain]').scrollIntoView({block:'start'})",
+        );
+        expect(
+          await evaluate(
+            regular,
+            "document.documentElement.scrollWidth <= innerWidth",
+          ),
+        ).toBe(true);
+        const image = await regular("Page.captureScreenshot", {
+          format: "png",
+        });
+        await writeFile(
+          join(Bun.env.BROWSER_EVIDENCE_DIR, `options-domain-${width}.png`),
+          Buffer.from(image.data, "base64"),
+        );
+      }
+    }
   } finally {
     await chrome.close();
   }

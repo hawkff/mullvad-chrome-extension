@@ -435,24 +435,54 @@ export function App({ context }: { context: BrowserContext }) {
                       Random mode
                     </label>
                     <p className="hint">
-                      Session-stable selection per destination. Random mode can
-                      override explicit proxy selections; exclusions remain
-                      direct.
+                      Session-stable selection per destination. Random mode
+                      overrides global and website selections and all
+                      exclusions. Local address bypasses still apply.
                     </p>
-                    <h3>Current website</h3>
-                    <button type="button" onClick={activeSite}>
-                      Use active website
-                    </button>
+                    <h3>{isOptions ? "Website domain" : "Current website"}</h3>
+                    {isOptions ? (
+                      <>
+                        <label htmlFor="website-domain">
+                          Domain or subdomain
+                        </label>
+                        <input
+                          id="website-domain"
+                          type="text"
+                          placeholder="example.com"
+                          autoCapitalize="none"
+                          spellCheck={false}
+                          value={host}
+                          onChange={(event) => {
+                            setHost(event.target.value);
+                            setTabId(undefined);
+                          }}
+                        />
+                        <p className="hint">
+                          Enter a domain without a URL or port. A registrable
+                          parent domain also covers its subdomains.
+                        </p>
+                      </>
+                    ) : (
+                      <button type="button" onClick={activeSite}>
+                        Use active website
+                      </button>
+                    )}
                     {host ? (
                       <>
-                        <p className="hostname">{host}</p>
-                        <p>
-                          {excluded
-                            ? "Excluded from proxying"
-                            : siteRule
-                              ? `${siteRule.enabled ? "Enabled" : "Disabled"} rule · ${siteRule.serverId}`
-                              : "No exact website rule. Parent or global rules may apply."}
-                        </p>
+                        {!isOptions ? (
+                          <>
+                            <p className="hostname">{host}</p>
+                            <p>
+                              {excluded
+                                ? routing?.randomMode
+                                  ? "Exclusion saved but inactive while random mode is on"
+                                  : "Excluded when random mode is off"
+                                : siteRule
+                                  ? `${siteRule.enabled ? "Enabled" : "Disabled"} rule · ${siteRule.serverId}`
+                                  : "No exact website rule. Parent or global rules may apply."}
+                            </p>
+                          </>
+                        ) : null}
                         <div className="actions">
                           <button
                             type="button"
@@ -476,7 +506,7 @@ export function App({ context }: { context: BrowserContext }) {
                               )
                             }
                           >
-                            {excluded ? "Remove exclusion" : "Never proxy"}
+                            {excluded ? "Remove exclusion" : "Add exclusion"}
                           </button>
                           {siteRule ? (
                             <button
@@ -492,8 +522,9 @@ export function App({ context }: { context: BrowserContext }) {
                       </>
                     ) : (
                       <p className="hint">
-                        Allow optional tab access to configure the active
-                        website.
+                        {isOptions
+                          ? "Enter a domain above to choose its location or add an exclusion without visiting it."
+                          : "Allow optional tab access to configure the active website."}
                       </p>
                     )}
                   </fieldset>
@@ -569,12 +600,18 @@ export function App({ context }: { context: BrowserContext }) {
                       Rules match destination hosts, not the page that initiates
                       a request.
                     </p>
+                    {routing?.randomMode ? (
+                      <p role="status">
+                        Random mode is on. Saved exclusions are inactive; these
+                        destinations use random routing.
+                      </p>
+                    ) : null}
                     <fieldset disabled={busy}>
                       {routing?.rules.length === 0 &&
                       routing.exclusions.length === 0 ? (
                         <p>
-                          No website rules. Use the active website controls
-                          above to add one.
+                          No website rules. Enter a domain above to add a rule
+                          or exclusion.
                         </p>
                       ) : null}
                       {routing?.rules.map((rule) => (
@@ -617,7 +654,12 @@ export function App({ context }: { context: BrowserContext }) {
                       {routing?.exclusions.map((item) => (
                         <div className="rule" key={item}>
                           <span>
-                            {item} <small>Never proxy</small>
+                            {item}{" "}
+                            <small>
+                              {routing.randomMode
+                                ? "Inactive while random mode is on"
+                                : "Direct while random mode is off"}
+                            </small>
                           </span>
                           <button
                             type="button"
