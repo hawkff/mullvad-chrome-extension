@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
   currentWebsiteTab,
+  exitStatus,
   freshness,
   incognitoScopeDescription,
   isImportPreview,
   isSnapshot,
+  proxyStatus,
   resolveUiContext,
   searchServers,
   validateResponse,
@@ -80,6 +82,11 @@ test("location search combines country, city and hostname case-insensitively", (
     ),
   ).toEqual(["se-got-001"]);
   expect(searchServers(fixture.servers.value, "zzzz")).toEqual([]);
+  const relay = {
+    ...fixture.servers.value[0],
+    hostname: "se-got-wg-socks5-001.relays.mullvad.net",
+  };
+  expect(searchServers([relay], "se-got-001")).toEqual([relay]);
   expect(
     searchServers(fixture.servers.value, "").map((server) => server.country),
   ).toEqual(["Germany", "Sweden"]);
@@ -90,14 +97,56 @@ test("freshness distinguishes unknown, blocked and stale data", () => {
     freshness({ status: "blocked", message: "Incognito unavailable" }),
   ).toContain("Incognito unavailable");
   expect(freshness({ status: "ready", updatedAt: 1, value: [] })).toContain(
-    "Stale cached data",
+    "Stale",
   );
   expect(freshness({ status: "ready", updatedAt: 0, value: [] })).toContain(
     "unknown time",
   );
   expect(
     freshness({ status: "ready", updatedAt: Date.now(), value: [] }),
-  ).toContain("Fresh cached data");
+  ).toMatch(/^Updated /);
+});
+
+test("status summary names route exceptions and any non-Mullvad address", () => {
+  const snapshot = structuredClone(fixture);
+  snapshot.proxy = { ...snapshot.proxy, applied: true, status: "ready" };
+  snapshot.settings.routing = {
+    ...snapshot.settings.routing,
+    enabled: true,
+    globalServerId: "se-got-001",
+    rules: [{ host: "example.com", enabled: true, serverId: "de-ber-001" }],
+    exclusions: ["intranet.example"],
+  };
+  expect(proxyStatus(snapshot, "regular", "Gothenburg, Sweden")).toEqual({
+    tone: "on",
+    title: "Proxy on",
+    detail:
+      "All websites via Gothenburg, Sweden, except 1 website rule and 1 exclusion.",
+  });
+  snapshot.settings.routing.enabled = false;
+  snapshot.proxy.applied = false;
+  expect(proxyStatus(snapshot, "regular", "").tone).toBe("warn");
+  snapshot.settings.routing.rules = [];
+  expect(proxyStatus(snapshot, "regular", "").title).toBe("Proxy off");
+  snapshot.diagnostics.ipv4 = {
+    status: "ready",
+    updatedAt: 1,
+    value: { ip: "198.51.100.1", isMullvad: true },
+  };
+  expect(exitStatus(snapshot)).toEqual(["on", "Mullvad · 198.51.100.1"]);
+  snapshot.diagnostics.ipv6 = {
+    status: "ready",
+    updatedAt: 1,
+    value: { ip: "2001:db8::1", isMullvad: false },
+  };
+  expect(exitStatus(snapshot)).toEqual(["error", "Not Mullvad · 2001:db8::1"]);
+  snapshot.diagnostics.ipv4 = { status: "error", message: "Timed out" };
+  snapshot.diagnostics.ipv6 = {
+    status: "ready",
+    updatedAt: 1,
+    value: { ip: "2001:db8::1", isMullvad: true },
+  };
+  expect(exitStatus(snapshot)).toEqual(["on", "Mullvad · 2001:db8::1"]);
 });
 
 test("Incognito scope labels distinguish inheritance, overrides and unknown state", () => {

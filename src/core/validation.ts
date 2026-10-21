@@ -87,6 +87,10 @@ function hosts(value: unknown): string[] {
     throw new Error("Canonical host collision");
   return result;
 }
+// Upstream shows relays as "se-got-001" rather than their SOCKS5 hostnames.
+export function relayName(hostname: string): string {
+  return hostname.replace("wg-socks5-", "").replace(".relays.mullvad.net", "");
+}
 function serverId(value: unknown, servers: readonly Server[]): string {
   const id = string(value);
   if (id !== INTERNAL_DEFAULT_SERVER_ID && !servers.some((s) => s.id === id))
@@ -229,14 +233,11 @@ function firefoxProxy(
     throw new Error(
       `Unrecognized proxy endpoint ${endpoint}:${port}; refresh the server catalog or choose a Mullvad server`,
     );
-  const upstreamName = id
-    .replace("wg-socks5-", "")
-    .replace(".relays.mullvad.net", "");
   if (
     d.server &&
     id !== INTERNAL_DEFAULT_SERVER_ID &&
     d.server !== id &&
-    d.server !== upstreamName
+    d.server !== relayName(id)
   )
     throw new Error(
       `Proxy details server does not match endpoint: ${d.server}`,

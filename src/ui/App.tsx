@@ -1,32 +1,48 @@
 import { useEffect, useRef, useState } from "react";
-import { checked, host as validateHost } from "../core/validation";
+import { checked, relayName, host as validateHost } from "../core/validation";
 import type { Command, CommandResult } from "../shared/messages";
 import {
   type BrowserContext,
-  type ConnectionObservation,
-  type DnsObservation,
   type ImportPreview,
   INTERNAL_DEFAULT_SERVER_ID,
-  type LoadState,
   type Snapshot,
 } from "../shared/state";
 import {
+  checkStatus,
   client,
   currentWebsiteTab,
+  exitStatus,
   freshness,
   incognitoScopeDescription,
+  type Observed,
+  proxyStatus,
+  STALE_AFTER,
   searchServers,
+  type Tone,
 } from "./client";
 
 const isOptions = location.pathname.endsWith("options.html");
+const icons: Record<Tone, string> = {
+  on: "M5 12.5l4.5 4.5L19 7.5",
+  off: "M7 12h10",
+  warn: "M12 6.5v7M12 17.5v.01",
+  error: "M7 7l10 10M17 7L7 17",
+};
 
-function Observation({
-  title,
-  state,
-}: {
-  title: string;
-  state: LoadState<ConnectionObservation | DnsObservation[]>;
-}) {
+function Mark({ tone }: { tone: Tone }) {
+  return (
+    <svg
+      className="mark"
+      data-tone={tone}
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+    >
+      <path d={icons[tone]} />
+    </svg>
+  );
+}
+
+function Observation({ title, state }: { title: string; state: Observed }) {
   const values =
     state.status === "ready"
       ? Array.isArray(state.value)
@@ -36,7 +52,7 @@ function Observation({
   return (
     <div className="observation">
       <h3>{title}</h3>
-      <p>{freshness(state)}</p>
+      <p className="meta">{freshness(state)}</p>
       {state.status === "ready" ? (
         values.length ? (
           <ul>
@@ -50,9 +66,9 @@ function Observation({
                     : "Non-Mullvad observed"}
                 </strong>
                 <br />
-                {value.ip}
+                <span className="data">{value.ip}</span>
                 {value.country ? ` · ${value.country}` : ""}
-                {"hostname" in value ? (
+                {"hostname" in value && value.hostname ? (
                   <>
                     <br />
                     {value.hostname}
@@ -82,6 +98,16 @@ export function App({ context }: { context: BrowserContext }) {
   useEffect(() => {
     if (picker) searchInput.current?.focus();
   }, [picker]);
+  const errorBox = useRef<HTMLParagraphElement>(null);
+  useEffect(() => {
+    // Popup content scrolls; keep a new error in view of the control that caused it.
+    if (error) errorBox.current?.scrollIntoView({ block: "nearest" });
+  }, [error]);
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(""), 4000);
+    return () => clearTimeout(timer);
+  }, [notice]);
   const [importText, setImportText] = useState("");
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [section, setSection] = useState("routing");
@@ -120,7 +146,9 @@ export function App({ context }: { context: BrowserContext }) {
           ? "Status refreshed."
           : command.type === "diagnostics.run"
             ? "Checks finished. Review the observations below."
-            : "Settings updated.",
+            : command.type === "servers.refresh"
+              ? "Server list updated."
+              : "Settings updated.",
       );
       if (reload && value.settings.preferences.autoReload && !isOptions) {
         try {
@@ -158,6 +186,30 @@ export function App({ context }: { context: BrowserContext }) {
     };
   }, [context]);
 
+  function openPicker(next: "global" | "site") {
+    setTarget(next);
+    setPicker(true);
+    const list = snapshot?.servers;
+    // Like upstream, load the relay list when the picker opens without a current copy.
+    if (
+      list &&
+      (list.status !== "ready" || Date.now() - list.updatedAt > STALE_AFTER)
+    )
+      void mutate({ type: "servers.refresh" });
+  }
+  async function setRandom(enabled: boolean) {
+    // The worker refuses random mode until a relay list has loaded.
+    if (
+      enabled &&
+      snapshot?.servers.status !== "ready" &&
+      !(await mutate({ type: "servers.refresh" }))
+    )
+      return;
+    await mutate(
+      { type: "settings.update", patch: { randomMode: enabled } },
+      true,
+    );
+  }
   async function activeSite() {
     setError("");
     try {
@@ -264,6 +316,14 @@ export function App({ context }: { context: BrowserContext }) {
     context === "incognito" ? snapshot?.incognitoProxy : snapshot?.proxy;
   const servers =
     snapshot?.servers.status === "ready" ? snapshot.servers.value : [];
+  const serverLabel = (id: string) => {
+    if (id === INTERNAL_DEFAULT_SERVER_ID)
+      return "VPN-internal SOCKS5 · 10.64.0.1:1080";
+    const server = servers.find((row) => row.id === id);
+    return server
+      ? `${server.city}, ${server.country} · ${relayName(server.hostname)}${server.online ? "" : " · Offline"}`
+      : `Unavailable server: ${id}`;
+  };
   const selected = servers.find((s) => s.id === routing?.globalServerId);
   const canonical = checked(() => validateHost(host));
   const siteRule = canonical.ok
@@ -271,52 +331,181 @@ export function App({ context }: { context: BrowserContext }) {
     : undefined;
   const excluded =
     canonical.ok && (routing?.exclusions.includes(canonical.value) ?? false);
+  const matches = picker ? searchServers(servers, query) : [];
+  const current =
+    target === "site" ? siteRule?.serverId : routing?.globalServerId;
+  const status = snapshot
+    ? proxyStatus(
+        snapshot,
+        context,
+        selected
+          ? `${selected.city}, ${selected.country}`
+          : routing?.globalServerId === INTERNAL_DEFAULT_SERVER_ID
+            ? "the VPN-internal proxy"
+            : "an unavailable server",
+      )
+    : undefined;
+  const checks = snapshot
+    ? ([
+        ["IPv4", snapshot.diagnostics.ipv4],
+        ["IPv6", snapshot.diagnostics.ipv6],
+        ["DNS", snapshot.diagnostics.dns],
+      ] as const)
+    : [];
+
+  const locationPicker =
+    snapshot && picker ? (
+      <section className="card" aria-labelledby="picker-title">
+        <div className="card-head">
+          <h2 id="picker-title">
+            {target === "site" ? "Site location" : "Global location"}
+          </h2>
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => setPicker(false)}
+          >
+            Close
+          </button>
+        </div>
+        {target === "site" ? (
+          <p className="meta">
+            For <strong>{canonical.ok ? canonical.value : host}</strong>
+          </p>
+        ) : null}
+        <label htmlFor="server-search">Search country, city or server</label>
+        <input
+          id="server-search"
+          ref={searchInput}
+          type="search"
+          placeholder="Sweden, Gothenburg or se-got-001"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        <div className="meta-row">
+          <p className="meta">{freshness(snapshot.servers)}</p>
+          <button
+            type="button"
+            className="ghost"
+            disabled={busy}
+            onClick={() => mutate({ type: "servers.refresh" })}
+          >
+            Refresh server list
+          </button>
+        </div>
+        <ul className="server-list">
+          {matches.map((server, index) => {
+            const previous = matches[index - 1];
+            const country = server.country !== previous?.country;
+            return (
+              <li key={server.id}>
+                {country ? <h3 className="country">{server.country}</h3> : null}
+                {country || server.city !== previous?.city ? (
+                  <h4 className="city">{server.city}</h4>
+                ) : null}
+                <button
+                  type="button"
+                  disabled={busy || !server.online}
+                  aria-current={server.id === current || undefined}
+                  onClick={() => select(server.id)}
+                >
+                  <span className="relay">
+                    <span className="sr-only">{server.city}, </span>
+                    {relayName(server.hostname)}
+                  </span>
+                  <span className="state">
+                    {server.id === current ? (
+                      <>
+                        <Mark tone="on" /> In use
+                      </>
+                    ) : server.online ? null : (
+                      "Offline"
+                    )}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+        {matches.length === 0 ? (
+          <p>No matching servers. Refresh the list or change your search.</p>
+        ) : null}
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => select(INTERNAL_DEFAULT_SERVER_ID)}
+        >
+          Use VPN-internal default
+        </button>
+      </section>
+    ) : null;
+
+  const settingsButton = isOptions ? null : (
+    <button
+      type="button"
+      className="ghost"
+      title={
+        context === "incognito"
+          ? "Opens regular, persistent settings"
+          : undefined
+      }
+      onClick={() => chrome.runtime.openOptionsPage()}
+    >
+      {context === "incognito" ? "Regular settings" : "Settings"}
+    </button>
+  );
+
   return (
     <div className={isOptions ? "app options" : "app popup"}>
       <header>
         <div className="brand">
-          <svg aria-hidden="true" width="28" height="28" viewBox="0 0 28 28">
-            <path
-              d="M4 7h20v14H4zM9 7V4h10v3M9 12h10M9 16h6"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-            />
+          <svg aria-hidden="true" width="24" height="24" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9M12 3C9.5 5.6 8.2 8.6 8.2 12s1.3 6.4 3.8 9" />
           </svg>
           <h1>Mullvad Proxy</h1>
+          <span className="tag">Unofficial</span>
         </div>
-        <span>Unofficial Chrome port</span>
-        {!isOptions ? (
-          <button
-            type="button"
-            className="text"
-            title={
-              context === "incognito"
-                ? "Opens regular, persistent settings"
-                : undefined
-            }
-            onClick={() => chrome.runtime.openOptionsPage()}
-          >
-            {context === "incognito" ? "Regular settings" : "Settings"}
-          </button>
+        {context === "regular" ? settingsButton : null}
+        {!isOptions && snapshot && status ? (
+          <ul className="pills" aria-label="Status summary">
+            {(
+              [
+                ["Proxy", status.tone, status.title],
+                ["VPN", ...exitStatus(snapshot)],
+                ["DNS", ...checkStatus(snapshot.diagnostics.dns)],
+              ] as const
+            ).map(([name, tone, text]) => {
+              // Connection checks observe browser requests, not the VPN tunnel itself.
+              const label = name === "Proxy" ? text : `Browser check: ${text}`;
+              return (
+                <li key={name} className="pill" title={label}>
+                  <Mark tone={tone} />
+                  {name}
+                  <span className="sr-only">: {label}</span>
+                </li>
+              );
+            })}
+          </ul>
         ) : null}
       </header>
       <main>
-        <p className="context">
-          {context === "incognito"
-            ? "Incognito window · private session"
-            : "Regular browsing"}
-        </p>
+        {context === "incognito" ? (
+          <div className="context">
+            <p>Incognito window</p>
+            {settingsButton}
+          </div>
+        ) : null}
         {error ? (
-          <p role="alert" className="error">
+          <p role="alert" className="error" ref={errorBox}>
             {error}
           </p>
         ) : null}
         <p className="feedback" role="status">
           {busy ? "Working…" : notice}
         </p>
-        {!snapshot ? (
-          <section aria-busy={busy}>
+        {!snapshot || !routing || !effective || !status ? (
+          <section className="card" aria-busy={busy}>
             <h2>Connecting to the extension</h2>
             <p>No connection or proxy status is available yet.</p>
             <button
@@ -327,26 +516,28 @@ export function App({ context }: { context: BrowserContext }) {
               Retry connection
             </button>
           </section>
+        ) : !isOptions && picker ? (
+          locationPicker
         ) : (
           <>
-            <section>
-              <div className="heading">
-                <h2>Browser proxy</h2>
+            <section className="card" aria-labelledby="status-title">
+              <div className="card-head">
+                <h2 id="status-title">Browser proxy</h2>
                 <button
                   type="button"
+                  className="ghost"
                   disabled={busy}
                   onClick={() => mutate({ type: "snapshot" })}
                 >
                   Refresh status
                 </button>
               </div>
-              <strong className={effective?.applied ? "success" : "warning"}>
-                {effective?.applied
-                  ? "Proxy configuration applied"
-                  : "Proxy configuration not confirmed"}
-              </strong>
-              <p>{effective?.message || `Status: ${effective?.status}`}</p>
-              <p className="hint">Effective context: {effective?.scope}</p>
+              <p className="status" data-tone={status.tone}>
+                <Mark tone={status.tone} />
+                <span>
+                  <strong>{status.title}</strong> {status.detail}
+                </span>
+              </p>
               {context === "incognito" ? (
                 <p className="hint">
                   {incognitoScopeDescription(snapshot.incognitoProxy)} Routing
@@ -363,11 +554,11 @@ export function App({ context }: { context: BrowserContext }) {
                     window to check its effective status.
                   </p>
                 ) : null}
-                <p>
-                  Ownership: {effective?.ownership.replaceAll("_", " ")}
+                <p className="hint">
+                  Ownership: {effective.ownership.replaceAll("_", " ")}
                   <br />
-                  Effective context: {effective?.scope} · setting:{" "}
-                  {effective?.settingScope}
+                  Effective context: {effective.scope} · setting:{" "}
+                  {effective.settingScope}
                 </p>
                 <p className="hint">
                   This extension does not connect the VPN. Mullvad SOCKS5
@@ -377,7 +568,7 @@ export function App({ context }: { context: BrowserContext }) {
               </details>
             </section>
             {isOptions ? (
-              <nav aria-label="Settings sections">
+              <nav className="tabs" aria-label="Settings sections">
                 {["routing", "privacy", "history", "backup"].map((name) => (
                   <button
                     type="button"
@@ -394,239 +585,177 @@ export function App({ context }: { context: BrowserContext }) {
             ) : null}
             {!isOptions || section === "routing" ? (
               <>
-                <section>
+                <section className="card">
                   <h2>Proxy routing</h2>
                   <fieldset disabled={busy}>
-                    <label className="check">
-                      <input
-                        type="checkbox"
-                        checked={routing?.enabled ?? false}
-                        onChange={(e) =>
-                          mutate(
-                            {
-                              type: "settings.update",
-                              patch: { enabled: e.target.checked },
-                            },
-                            true,
-                          )
-                        }
-                      />
-                      Proxy all websites
-                    </label>
-                    <p>
-                      {selected
-                        ? `${selected.city}, ${selected.country} · ${selected.hostname}${selected.online ? "" : " · Offline"}`
-                        : routing?.globalServerId === INTERNAL_DEFAULT_SERVER_ID
-                          ? "VPN-internal SOCKS5 · 10.64.0.1:1080"
-                          : routing?.globalServerId
-                            ? `Unavailable server: ${routing.globalServerId}`
-                            : "No global server selected"}
-                    </p>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setTarget("global");
-                        setPicker(!picker);
-                      }}
-                    >
-                      Change global location
-                    </button>
-                    <label className="check">
-                      <input
-                        type="checkbox"
-                        checked={routing?.randomMode ?? false}
-                        onChange={(e) =>
-                          mutate(
-                            {
-                              type: "settings.update",
-                              patch: { randomMode: e.target.checked },
-                            },
-                            true,
-                          )
-                        }
-                      />
-                      Random mode
-                    </label>
-                    <p className="hint">
-                      Session-stable selection per destination. Random mode
-                      overrides global and website selections and all
-                      exclusions. Local address bypasses still apply.
-                    </p>
-                    <h3>{isOptions ? "Website domain" : "Current website"}</h3>
-                    {isOptions ? (
-                      <>
-                        <label htmlFor="website-domain">
-                          Domain or subdomain
-                        </label>
+                    <div className="row">
+                      <label className="switch">
+                        <span>Proxy all websites</span>
                         <input
-                          id="website-domain"
-                          type="text"
-                          placeholder="example.com"
-                          autoCapitalize="none"
-                          spellCheck={false}
-                          value={host}
-                          onChange={(event) => setHost(event.target.value)}
+                          type="checkbox"
+                          checked={routing.enabled}
+                          onChange={(e) =>
+                            mutate(
+                              {
+                                type: "settings.update",
+                                patch: { enabled: e.target.checked },
+                              },
+                              true,
+                            )
+                          }
                         />
-                        <p className="hint">
-                          Enter a domain without a URL or port. A registrable
-                          parent domain also covers its subdomains.
-                        </p>
-                      </>
-                    ) : (
-                      <button type="button" onClick={activeSite}>
-                        Use active website
+                      </label>
+                      <p className="meta">
+                        {routing.globalServerId
+                          ? serverLabel(routing.globalServerId)
+                          : "No global server selected"}
+                      </p>
+                      <button
+                        type="button"
+                        className="primary"
+                        onClick={() =>
+                          picker && target === "global"
+                            ? setPicker(false)
+                            : openPicker("global")
+                        }
+                      >
+                        Change global location
                       </button>
-                    )}
-                    {host ? (
-                      <>
-                        {!isOptions ? (
-                          <>
-                            <p className="hostname">{host}</p>
-                            <p>
-                              {excluded
-                                ? routing?.randomMode
-                                  ? "Exclusion saved but inactive while random mode is on"
-                                  : "Excluded when random mode is off"
-                                : siteRule
-                                  ? `${siteRule.enabled ? "Enabled" : "Disabled"} rule · ${siteRule.serverId}`
-                                  : "No exact website rule. Parent or global rules may apply."}
-                            </p>
-                          </>
-                        ) : null}
-                        <div className="actions">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setTarget("site");
-                              setPicker(true);
-                            }}
-                          >
-                            Choose site location
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              mutate(
-                                {
-                                  type: "exclusion.set",
-                                  host,
-                                  excluded: !excluded,
-                                },
-                                true,
-                              )
-                            }
-                          >
-                            {excluded ? "Remove exclusion" : "Add exclusion"}
-                          </button>
-                          {siteRule ? (
+                    </div>
+                    <div className="row">
+                      <label className="switch">
+                        <span>Random mode</span>
+                        <input
+                          type="checkbox"
+                          checked={routing.randomMode}
+                          onChange={(e) => setRandom(e.target.checked)}
+                        />
+                      </label>
+                      <p className="hint">
+                        Session-stable selection per destination. Random mode
+                        overrides global and website selections and all
+                        exclusions. Local address bypasses still apply.
+                      </p>
+                    </div>
+                    <div className="row">
+                      <h3>
+                        {isOptions ? "Website domain" : "Current website"}
+                      </h3>
+                      {isOptions ? (
+                        <>
+                          <label htmlFor="website-domain">
+                            Domain or subdomain
+                          </label>
+                          <input
+                            id="website-domain"
+                            type="text"
+                            placeholder="example.com"
+                            autoCapitalize="none"
+                            spellCheck={false}
+                            value={host}
+                            onChange={(event) => setHost(event.target.value)}
+                          />
+                          <p className="hint">
+                            Enter a domain without a URL or port. A registrable
+                            parent domain also covers its subdomains.
+                          </p>
+                        </>
+                      ) : (
+                        <button type="button" onClick={activeSite}>
+                          Use active website
+                        </button>
+                      )}
+                      {host ? (
+                        <>
+                          {!isOptions ? (
+                            <>
+                              <p className="hostname">{host}</p>
+                              <p className="meta">
+                                {excluded
+                                  ? routing.randomMode
+                                    ? "Exclusion saved but inactive while random mode is on"
+                                    : "Excluded when random mode is off"
+                                  : siteRule
+                                    ? `${siteRule.enabled ? "Enabled" : "Disabled"} rule · ${serverLabel(siteRule.serverId)}`
+                                    : "No exact website rule. Parent or global rules may apply."}
+                              </p>
+                            </>
+                          ) : null}
+                          <div className="actions">
+                            <button
+                              type="button"
+                              className="primary"
+                              onClick={() => openPicker("site")}
+                            >
+                              Choose site location
+                            </button>
                             <button
                               type="button"
                               onClick={() =>
-                                mutate({ type: "rule.remove", host }, true)
+                                mutate(
+                                  {
+                                    type: "exclusion.set",
+                                    host,
+                                    excluded: !excluded,
+                                  },
+                                  true,
+                                )
                               }
                             >
-                              Reset site rule
+                              {excluded ? "Remove exclusion" : "Add exclusion"}
                             </button>
-                          ) : null}
-                        </div>
-                      </>
-                    ) : (
-                      <p className="hint">
-                        {isOptions
-                          ? "Enter a domain above to choose its location or add an exclusion without visiting it."
-                          : "Allow optional tab access to configure the active website."}
-                      </p>
-                    )}
+                            {siteRule ? (
+                              <button
+                                type="button"
+                                className="danger"
+                                onClick={() =>
+                                  mutate({ type: "rule.remove", host }, true)
+                                }
+                              >
+                                Reset site rule
+                              </button>
+                            ) : null}
+                          </div>
+                        </>
+                      ) : (
+                        <p className="hint">
+                          {isOptions
+                            ? "Enter a domain above to choose its location or add an exclusion without visiting it."
+                            : "Allow optional tab access to configure the active website."}
+                        </p>
+                      )}
+                    </div>
                   </fieldset>
                 </section>
-                {picker ? (
-                  <section>
-                    <div className="heading">
-                      <h2>
-                        {target === "site"
-                          ? "Site location"
-                          : "Global location"}
-                      </h2>
-                      <button type="button" onClick={() => setPicker(false)}>
-                        Close
-                      </button>
-                    </div>
-                    <label htmlFor="server-search">
-                      Search country, city or server
-                    </label>
-                    <input
-                      id="server-search"
-                      ref={searchInput}
-                      type="search"
-                      value={query}
-                      onChange={(e) => setQuery(e.target.value)}
-                    />
-                    <p>{freshness(snapshot.servers)}</p>
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => mutate({ type: "servers.refresh" })}
-                    >
-                      Refresh server list
-                    </button>
-                    <ul className="server-list">
-                      {searchServers(servers, query).map((server) => (
-                        <li key={server.id}>
-                          <button
-                            type="button"
-                            disabled={busy || !server.online}
-                            onClick={() => select(server.id)}
-                          >
-                            <strong>
-                              {server.city}, {server.country}
-                            </strong>
-                            <span>
-                              {server.hostname} ·{" "}
-                              {server.online ? "Available" : "Offline"}
-                            </span>
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                    {searchServers(servers, query).length === 0 ? (
-                      <p>
-                        No matching servers. Refresh the list or change your
-                        search.
-                      </p>
-                    ) : null}
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => select(INTERNAL_DEFAULT_SERVER_ID)}
-                    >
-                      Use VPN-internal default
-                    </button>
-                  </section>
-                ) : null}
+                {isOptions ? locationPicker : null}
                 {isOptions ? (
-                  <section>
+                  <section className="card">
                     <h2>Website rules & exclusions</h2>
-                    <p>
+                    <p className="hint">
                       Rules match destination hosts, not the page that initiates
                       a request.
                     </p>
-                    {routing?.randomMode ? (
-                      <p role="status">
+                    {routing.randomMode ? (
+                      <p role="status" className="notice">
                         Random mode is on. Saved exclusions are inactive; these
                         destinations use random routing.
                       </p>
                     ) : null}
                     <fieldset disabled={busy}>
-                      {routing?.rules.length === 0 &&
+                      {routing.rules.length === 0 &&
                       routing.exclusions.length === 0 ? (
-                        <p>
+                        <p className="empty">
                           No website rules. Enter a domain above to add a rule
                           or exclusion.
                         </p>
                       ) : null}
-                      {routing?.rules.map((rule) => (
+                      {routing.rules.map((rule) => (
                         <div className="rule" key={rule.host}>
-                          <label className="check">
+                          <label className="switch">
+                            <span>
+                              {rule.host}
+                              <small>{serverLabel(rule.serverId)}</small>
+                            </span>
                             <input
                               type="checkbox"
                               checked={rule.enabled}
@@ -643,13 +772,10 @@ export function App({ context }: { context: BrowserContext }) {
                                 )
                               }
                             />
-                            <span>
-                              {rule.host}
-                              <small>{rule.serverId}</small>
-                            </span>
                           </label>
                           <button
                             type="button"
+                            className="danger"
                             onClick={() =>
                               mutate(
                                 { type: "rule.remove", host: rule.host },
@@ -661,7 +787,7 @@ export function App({ context }: { context: BrowserContext }) {
                           </button>
                         </div>
                       ))}
-                      {routing?.exclusions.map((item) => (
+                      {routing.exclusions.map((item) => (
                         <div className="rule" key={item}>
                           <span>
                             {item}{" "}
@@ -694,11 +820,12 @@ export function App({ context }: { context: BrowserContext }) {
               </>
             ) : null}
             {!isOptions ? (
-              <section>
-                <div className="heading">
+              <section className="card">
+                <div className="card-head">
                   <h2>VPN & DNS check</h2>
                   <button
                     type="button"
+                    className="primary"
                     disabled={busy}
                     onClick={() =>
                       mutate({
@@ -710,11 +837,18 @@ export function App({ context }: { context: BrowserContext }) {
                     Run checks
                   </button>
                 </div>
-                <p className="hint">
-                  Browser route · IPv4 {snapshot.diagnostics.ipv4.status} · IPv6{" "}
-                  {snapshot.diagnostics.ipv6.status} · DNS{" "}
-                  {snapshot.diagnostics.dns.status}
-                </p>
+                <ul className="checks">
+                  {checks.map(([name, state]) => {
+                    const [tone, text] = checkStatus(state);
+                    return (
+                      <li key={name}>
+                        <Mark tone={tone} />
+                        <span className="check-name">{name}</span>
+                        <span className="data">{text}</span>
+                      </li>
+                    );
+                  })}
+                </ul>
                 <details>
                   <summary>Observations & check scope</summary>
                   <p className="hint">
@@ -722,95 +856,103 @@ export function App({ context }: { context: BrowserContext }) {
                     of DNS leak prevention. The browser proxy can affect these
                     results.
                   </p>
-                  <Observation title="IPv4" state={snapshot.diagnostics.ipv4} />
-                  <Observation title="IPv6" state={snapshot.diagnostics.ipv6} />
-                  <Observation
-                    title="DNS resolvers"
-                    state={snapshot.diagnostics.dns}
-                  />
+                  {checks.map(([name, state]) => (
+                    <Observation
+                      key={name}
+                      title={name === "DNS" ? "DNS resolvers" : name}
+                      state={state}
+                    />
+                  ))}
                 </details>
               </section>
             ) : null}
             {isOptions && section === "privacy" ? (
-              <section>
+              <section className="card">
                 <h2>Chrome privacy</h2>
-                <p>
+                <p className="meta">
                   Optional privacy permission:{" "}
                   {snapshot.privacy.permissionGranted
                     ? "Granted"
                     : "Not granted"}
                 </p>
-                <h3>WebRTC non-proxied UDP</h3>
-                <p>
-                  Current policy: {snapshot.privacy.webRtc.value ?? "Unknown"}
-                  <br />
-                  Ownership:{" "}
-                  {snapshot.privacy.webRtc.ownership.replaceAll("_", " ")}
-                </p>
-                <p>
-                  Restrict non-proxied UDP to reduce WebRTC IP exposure. This
-                  does not disable WebRTC.
-                </p>
-                <div className="actions">
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => privacy("webRtcNonProxiedUdp", true)}
-                  >
-                    Restrict non-proxied UDP
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => privacy("webRtcNonProxiedUdp")}
-                  >
-                    Restore WebRTC override
-                  </button>
+                <div className="row">
+                  <h3>WebRTC non-proxied UDP</h3>
+                  <p className="meta">
+                    Current policy: {snapshot.privacy.webRtc.value ?? "Unknown"}{" "}
+                    · Ownership:{" "}
+                    {snapshot.privacy.webRtc.ownership.replaceAll("_", " ")}
+                  </p>
+                  <p className="hint">
+                    Restrict non-proxied UDP to reduce WebRTC IP exposure. This
+                    does not disable WebRTC.
+                  </p>
+                  <div className="actions">
+                    <button
+                      type="button"
+                      className="primary"
+                      disabled={busy}
+                      onClick={() => privacy("webRtcNonProxiedUdp", true)}
+                    >
+                      Restrict non-proxied UDP
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => privacy("webRtcNonProxiedUdp")}
+                    >
+                      Restore WebRTC override
+                    </button>
+                  </div>
                 </div>
-                <h3>Network prediction</h3>
-                <p>
-                  Current state:{" "}
-                  {snapshot.privacy.networkPrediction.value === null
-                    ? "Unknown"
-                    : snapshot.privacy.networkPrediction.value
-                      ? "Enabled"
-                      : "Disabled"}
-                  <br />
-                  Ownership:{" "}
-                  {snapshot.privacy.networkPrediction.ownership.replaceAll(
-                    "_",
-                    " ",
-                  )}
-                </p>
-                <div className="actions">
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => privacy("networkPrediction", false)}
-                  >
-                    Disable prediction
-                  </button>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => privacy("networkPrediction")}
-                  >
-                    Restore prediction override
-                  </button>
+                <div className="row">
+                  <h3>Network prediction</h3>
+                  <p className="meta">
+                    Current state:{" "}
+                    {snapshot.privacy.networkPrediction.value === null
+                      ? "Unknown"
+                      : snapshot.privacy.networkPrediction.value
+                        ? "Enabled"
+                        : "Disabled"}{" "}
+                    · Ownership:{" "}
+                    {snapshot.privacy.networkPrediction.ownership.replaceAll(
+                      "_",
+                      " ",
+                    )}
+                  </p>
+                  <div className="actions">
+                    <button
+                      type="button"
+                      className="primary"
+                      disabled={busy}
+                      onClick={() => privacy("networkPrediction", false)}
+                    >
+                      Disable prediction
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => privacy("networkPrediction")}
+                    >
+                      Restore prediction override
+                    </button>
+                  </div>
                 </div>
-                <h3>Recommended checks</h3>
-                <p>
-                  Review Chrome's “Use secure DNS” setting and your VPN DNS
-                  configuration. Chrome cannot reproduce Firefox's per-site
-                  proxy DNS controls.
-                </p>
+                <div className="row">
+                  <h3>Recommended checks</h3>
+                  <p className="hint">
+                    Review Chrome's “Use secure DNS” setting and your VPN DNS
+                    configuration. Chrome cannot reproduce Firefox's per-site
+                    proxy DNS controls.
+                  </p>
+                </div>
               </section>
             ) : null}
             {isOptions && section === "history" ? (
-              <section>
+              <section className="card">
                 <h2>Location history</h2>
                 <fieldset disabled={busy}>
-                  <label className="check">
+                  <label className="switch">
+                    <span>Remember location usage</span>
                     <input
                       type="checkbox"
                       checked={snapshot.settings.preferences.historyEnabled}
@@ -821,44 +963,37 @@ export function App({ context }: { context: BrowserContext }) {
                         })
                       }
                     />
-                    Remember location usage
                   </label>
-                  <p>Incognito activity does not enter persistent history.</p>
+                  <p className="hint">
+                    Incognito activity does not enter persistent history.
+                  </p>
                   {snapshot.history.length === 0 ? (
-                    <p>No saved locations yet.</p>
+                    <p className="empty">No saved locations yet.</p>
                   ) : (
                     <>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          if (confirm("Clear saved location history?"))
-                            void mutate({ type: "history.clear" });
-                        }}
-                      >
-                        Clear history
-                      </button>
                       {snapshot.history.map((entry) => (
                         <div className="rule" key={entry.serverId}>
                           <span>
                             {entry.city}, {entry.country}
                             <small>
-                              {entry.hostname} · Used {entry.count} times ·{" "}
+                              {relayName(entry.hostname)} · Used {entry.count}{" "}
+                              {entry.count === 1 ? "time" : "times"} ·{" "}
                               {new Date(entry.lastUsedAt).toLocaleString()}
                             </small>
                           </span>
                           <button
                             type="button"
                             onClick={() => {
-                              setTarget("global");
-                              setPicker(true);
+                              setQuery(relayName(entry.hostname));
                               setSection("routing");
-                              setQuery(entry.hostname);
+                              openPicker("global");
                             }}
                           >
                             Use location
                           </button>
                           <button
                             type="button"
+                            className="danger"
                             onClick={() =>
                               mutate({
                                 type: "history.remove",
@@ -870,15 +1005,25 @@ export function App({ context }: { context: BrowserContext }) {
                           </button>
                         </div>
                       ))}
+                      <button
+                        type="button"
+                        className="danger"
+                        onClick={() => {
+                          if (confirm("Clear saved location history?"))
+                            void mutate({ type: "history.clear" });
+                        }}
+                      >
+                        Clear history
+                      </button>
                     </>
                   )}
                 </fieldset>
               </section>
             ) : null}
             {isOptions && section === "backup" ? (
-              <section>
+              <section className="card">
                 <h2>Import / export</h2>
-                <p>
+                <p className="hint">
                   Import a native backup or upstream Firefox settings JSON.
                   Incompatible endpoints and Firefox-only DNS settings require
                   correction before import.
@@ -925,6 +1070,7 @@ export function App({ context }: { context: BrowserContext }) {
                 />
                 <button
                   type="button"
+                  className="primary"
                   disabled={busy || !importText.trim()}
                   onClick={previewImport}
                 >
@@ -953,6 +1099,7 @@ export function App({ context }: { context: BrowserContext }) {
                     </p>
                     <button
                       type="button"
+                      className="danger"
                       disabled={busy}
                       onClick={async () => {
                         if (
@@ -977,16 +1124,18 @@ export function App({ context }: { context: BrowserContext }) {
               </section>
             ) : null}
             {isOptions ? (
-              <section>
+              <section className="card">
                 <h2>Preferences & Incognito</h2>
                 <fieldset disabled={busy}>
-                  <label className="check">
+                  <label className="switch">
+                    <span>
+                      Reload the active website after popup routing changes
+                    </span>
                     <input
                       type="checkbox"
                       checked={snapshot.settings.preferences.autoReload}
                       onChange={(e) => setAutoReload(e.target.checked)}
                     />
-                    Reload the active website after popup routing changes
                   </label>
                 </fieldset>
                 <p className="hint">
@@ -994,37 +1143,45 @@ export function App({ context }: { context: BrowserContext }) {
                   the active HTTP or HTTPS website in the popup's window.
                   Options changes never reload a website.
                 </p>
-                <p>
-                  Incognito access:{" "}
-                  {snapshot.incognitoAllowed
-                    ? "Allowed by Chrome"
-                    : "Not allowed"}
-                  . Open Chrome → Extensions → Manage extensions → this
-                  extension → Allow in Incognito to opt in.
-                </p>
-                {context === "regular" ? (
-                  <p>
-                    This regular page does not inspect or monitor private
-                    routing.
+                <div className="row">
+                  <p className="meta">
+                    Incognito access:{" "}
+                    {snapshot.incognitoAllowed
+                      ? "Allowed by Chrome"
+                      : "Not allowed"}
+                    . Open Chrome → Extensions → Manage extensions → this
+                    extension → Allow in Incognito to opt in.
                   </p>
-                ) : null}
-                <p>
-                  Open the popup in an Incognito window to see effective
-                  private-context ownership. Incognito diagnostics may be
-                  blocked when Chrome cannot guarantee context-correct checks.
-                  Regular routing applies until you create a private-session
-                  override. Private routing changes and activity expire when the
-                  last Incognito window closes.
-                </p>
+                  {context === "regular" ? (
+                    <p className="hint">
+                      This regular page does not inspect or monitor private
+                      routing.
+                    </p>
+                  ) : null}
+                  <p className="hint">
+                    Open the popup in an Incognito window to see effective
+                    private-context ownership. Incognito diagnostics may be
+                    blocked when Chrome cannot guarantee context-correct checks.
+                    Regular routing applies until you create a private-session
+                    override. Private routing changes and activity expire when
+                    the last Incognito window closes.
+                  </p>
+                </div>
               </section>
             ) : null}
           </>
         )}
       </main>
       <footer>
-        Requires Mullvad VPN · GPL-3.0-or-later
-        <br />
-        Independent port. Not an official Mullvad product.
+        {isOptions ? (
+          <>
+            Requires Mullvad VPN · GPL-3.0-or-later
+            <br />
+            Independent port. Not an official Mullvad product.
+          </>
+        ) : (
+          "Unofficial port · Requires Mullvad VPN · GPL-3.0-or-later"
+        )}
       </footer>
     </div>
   );

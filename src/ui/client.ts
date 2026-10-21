@@ -1,9 +1,13 @@
+import { relayName } from "../core/validation";
 import type { Command, CommandResult, Response } from "../shared/messages";
 import type {
   BrowserContext,
+  ConnectionObservation,
+  DnsObservation,
   LoadState,
   ProxyStatus,
   Server,
+  Snapshot,
 } from "../shared/state";
 
 type Check = (value: unknown) => boolean;
@@ -198,7 +202,7 @@ export function searchServers(servers: Server[], query: string): Server[] {
   return servers
     .filter((server) =>
       terms.every((term) =>
-        `${server.country} ${server.countryCode} ${server.city} ${server.hostname}`
+        `${server.country} ${server.countryCode} ${server.city} ${server.hostname} ${relayName(server.hostname)}`
           .toLocaleLowerCase()
           .includes(term),
       ),
@@ -209,16 +213,107 @@ export function searchServers(servers: Server[], query: string): Server[] {
       ),
     );
 }
+export const STALE_AFTER = 24 * 60 * 60 * 1000;
 export function freshness(state: LoadState<unknown>): string {
-  if (state.status === "ready" && !state.updatedAt)
-    return "Cached data from an unknown time; refresh to update";
-  if (state.status === "ready")
-    return `${Date.now() - state.updatedAt > 86400000 ? "Stale cached data" : "Fresh cached data"} · ${new Date(state.updatedAt).toLocaleString()}`;
+  if (state.status === "ready") {
+    if (!state.updatedAt) return "Updated at an unknown time";
+    const when = new Date(state.updatedAt).toLocaleString([], {
+      dateStyle: "medium",
+      timeStyle: "short",
+    });
+    return Date.now() - state.updatedAt > STALE_AFTER
+      ? `Stale · updated ${when}`
+      : `Updated ${when}`;
+  }
   if (state.status === "unknown" || state.status === "pending")
     return state.status === "unknown" ? "Not checked" : "Checking…";
   return "message" in state
     ? `${state.status}: ${state.message}`
     : "Not checked";
+}
+
+export type Tone = "on" | "off" | "warn" | "error";
+export type Observed = LoadState<ConnectionObservation | DnsObservation[]>;
+const plural = (count: number, noun: string) =>
+  `${count} ${noun}${count === 1 ? "" : "s"}`;
+
+export function proxyStatus(
+  snapshot: Snapshot,
+  context: BrowserContext,
+  via: string,
+) {
+  const effective =
+    context === "incognito" ? snapshot.incognitoProxy : snapshot.proxy;
+  const routing = snapshot.settings.routing;
+  const rules = routing.rules.filter((rule) => rule.enabled).length;
+  const status = (tone: Tone, title: string, detail: string) => ({
+    tone,
+    title,
+    detail,
+  });
+  if (effective.status === "blocked")
+    return status("error", "Proxy blocked", effective.message ?? "");
+  if (effective.applied) {
+    if (routing.randomMode)
+      return status("on", "Proxy on", "Random location for each website.");
+    if (!routing.enabled)
+      return status(
+        "on",
+        "Proxy on",
+        `Rules for ${plural(rules, "website")}; other websites connect directly.`,
+      );
+    // Rules and exclusions override the global route for their hosts.
+    const exceptions = [
+      rules ? plural(rules, "website rule") : "",
+      routing.exclusions.length
+        ? plural(routing.exclusions.length, "exclusion")
+        : "",
+    ]
+      .filter(Boolean)
+      .join(" and ");
+    return status(
+      "on",
+      "Proxy on",
+      `All websites via ${via}${exceptions ? `, except ${exceptions}` : ""}.`,
+    );
+  }
+  if (
+    effective.status === "error" ||
+    routing.enabled ||
+    routing.randomMode ||
+    rules
+  )
+    return status(
+      "warn",
+      "Proxy not confirmed",
+      effective.message ?? `Status: ${effective.status}`,
+    );
+  return status("off", "Proxy off", "Websites connect directly.");
+}
+
+export function checkStatus(state: Observed): [Tone, string] {
+  if (state.status === "unknown") return ["off", "Not checked"];
+  if (state.status === "pending") return ["off", "Checking…"];
+  if (state.status !== "ready") return ["warn", "Unavailable"];
+  const rows = Array.isArray(state.value) ? state.value : [state.value];
+  if (!rows.length) return ["warn", "No resolvers observed"];
+  const mullvad = rows.every((row) => row.isMullvad);
+  const seen = Array.isArray(state.value)
+    ? plural(rows.length, "resolver")
+    : rows[0]?.ip;
+  return [
+    mullvad ? "on" : "error",
+    `${mullvad ? "Mullvad" : "Not Mullvad"} · ${seen}`,
+  ];
+}
+
+export function exitStatus(snapshot: Snapshot): [Tone, string] {
+  const { ipv4, ipv6 } = snapshot.diagnostics;
+  const ready = [ipv4, ipv6].filter((state) => state.status === "ready");
+  // A non-Mullvad address on either family outranks any Mullvad result.
+  return checkStatus(
+    ready.find((state) => !state.value.isMullvad) ?? ready[0] ?? ipv4,
+  );
 }
 
 export function incognitoScopeDescription(proxy: ProxyStatus): string {

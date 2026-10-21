@@ -108,9 +108,7 @@ test("App browser workflows, responsive layout and keyboard focus", async () => 
     await cdp("Page.navigate", { url: `${server.url}popup.html` });
     await wait("document.body.textContent.includes('Browser proxy')");
     expect(
-      await evaluate(
-        "document.body.textContent.includes('Proxy configuration applied')",
-      ),
+      await evaluate("document.body.textContent.includes('Proxy on')"),
     ).toBe(true);
     expect(
       await evaluate("document.documentElement.scrollWidth <= innerWidth"),
@@ -136,6 +134,8 @@ test("App browser workflows, responsive layout and keyboard focus", async () => 
         "document.querySelector('.server-list').textContent.includes('Gothenburg')",
       ),
     ).toBe(true);
+    await click("Close");
+    await wait("!document.querySelector('#server-search')");
     await click("Use active website");
     await wait(
       "document.querySelector('[role=alert]')?.textContent.includes('denied')",
@@ -164,9 +164,7 @@ test("App browser workflows, responsive layout and keyboard focus", async () => 
       "document.body.textContent.includes('This regular page does not inspect or monitor private routing')",
     );
     expect(
-      await evaluate(
-        "document.body.textContent.includes('Proxy configuration applied')",
-      ),
+      await evaluate("document.body.textContent.includes('Proxy on')"),
     ).toBe(true);
     expect(
       await evaluate(

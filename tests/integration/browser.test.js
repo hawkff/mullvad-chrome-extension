@@ -141,8 +141,13 @@ async function launch(extension, flags = [], display) {
       let cdp;
       try {
         cdp = await attach(targetId);
+        // A new target starts on a complete about:blank document before its URL commits.
         await waitFor(
-          () => evaluate(cdp, "document.readyState === 'complete'"),
+          () =>
+            evaluate(
+              cdp,
+              "location.href !== 'about:blank' && document.readyState === 'complete'",
+            ),
           "page ready",
         );
         return cdp;
@@ -233,6 +238,10 @@ test("real extension Incognito messages, session expiry and worker restart", asy
     const id = new URL(worker.url).host;
     let regular = await chrome.page(`chrome-extension://${id}/options.html`);
     expect((await message(regular, { type: "snapshot" })).ok).toBe(true);
+    // Chrome's extension-page stylesheet shrinks unstyled body text to 75%.
+    expect(
+      await evaluate(regular, "getComputedStyle(document.body).fontSize"),
+    ).toBe("14px");
     const enabled = await message(regular, {
       type: "settings.update",
       patch: { enabled: true },
@@ -333,6 +342,9 @@ test("real extension Incognito messages, session expiry and worker restart", asy
     });
     expect(override.ok).toBe(true);
     expect(await evaluate(first.page, "document.body.clientWidth")).toBe(384);
+    expect(
+      await evaluate(first.page, "getComputedStyle(document.body).fontSize"),
+    ).toBe("14px");
     expect(
       await evaluate(
         first.page,
@@ -556,6 +568,16 @@ test("real extension Incognito messages, session expiry and worker restart", asy
         regular,
         `Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()===${JSON.stringify(text)}).click()`,
       );
+    // This page loaded before the controlled catalog was stored; refresh its snapshot.
+    await click("Refresh status");
+    await waitFor(
+      () =>
+        evaluate(
+          regular,
+          "document.body.innerText.includes('Status refreshed.')",
+        ),
+      "options snapshot with the controlled catalog",
+    );
     await setDomain("https://example.co.uk/path");
     await click("Choose site location");
     await waitFor(
