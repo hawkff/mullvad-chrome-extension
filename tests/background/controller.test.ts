@@ -6,7 +6,6 @@ import wireServers from "../core/fixtures/servers.json";
 
 // Inject routing doubles without replacing the module used by routing tests.
 const routingCore = {
-  canonicalHost: (input: string) => ({ ok: true, value: input.toLowerCase() }),
   generatePac: (input: unknown) => JSON.stringify(input),
   validateCommand: (input: unknown) => {
     const value = input as Command;
@@ -69,20 +68,11 @@ let onProxySet: (() => void) | undefined;
 let privateQueries: number;
 function area(data: () => Record<string, unknown>, persistent: boolean) {
   return {
-    get: (key: string, done: (value: unknown) => void) =>
-      done({ [key]: structuredClone(data()[key]) }),
-    set: (value: Record<string, unknown>, done: () => void) => {
-      if (persistent && failStorage) {
-        Object.assign(chrome.runtime, {
-          lastError: { message: "storage failed" },
-        });
-        done();
-        Object.assign(chrome.runtime, { lastError: undefined });
-        return;
-      }
+    get: async (key: string) => ({ [key]: structuredClone(data()[key]) }),
+    set: async (value: Record<string, unknown>) => {
+      if (persistent && failStorage) throw new Error("storage failed");
       Object.assign(data(), structuredClone(value));
       if (persistent) writes++;
-      done();
     },
   };
 }
@@ -109,51 +99,34 @@ beforeEach(() => {
         id: "test",
         getURL: (path: string) =>
           `chrome-extension://test${path.startsWith("/") ? path : `/${path}`}`,
-        lastError: undefined,
       },
       storage: {
         local: area(() => local, true),
         session: area(() => session, false),
       },
-      extension: {
-        isAllowedIncognitoAccess: (done: (value: boolean) => void) =>
-          done(optedIn),
-      },
+      extension: { isAllowedIncognitoAccess: async () => optedIn },
       windows: {
-        getAll: (_: unknown, done: (value: unknown[]) => void) =>
-          done(privateWindow ? [{ id: 7, incognito: true }] : []),
-        getLastFocused: (_: unknown, done: (value: unknown) => void) =>
-          done({ incognito: false }),
+        getAll: async () => (privateWindow ? [{ id: 7, incognito: true }] : []),
+        getLastFocused: async () => ({ incognito: false }),
       },
       permissions: {
-        contains: (
-          { permissions }: { permissions: string[] },
-          done: (value: boolean) => void,
-        ) =>
-          done(
-            permissions[0] === "proxy" ? proxyPermission : privacyPermission,
-          ),
+        contains: async ({ permissions }: { permissions: string[] }) =>
+          permissions[0] === "proxy" ? proxyPermission : privacyPermission,
       },
       proxy: {
         settings: {
-          get: (
-            { incognito }: { incognito: boolean },
-            done: (value: unknown) => void,
-          ) => {
+          get: async ({ incognito }: { incognito: boolean }) => {
             if (incognito) privateQueries++;
-            done({
+            return {
               value: incognito ? (privateProxy ?? regular) : regular,
               levelOfControl:
                 incognito && privateProxy !== undefined
                   ? (privateOwner ?? owner)
                   : owner,
               incognitoSpecific: incognito && privateProxy !== undefined,
-            });
+            };
           },
-          set: (
-            { value, scope }: { value: unknown; scope: string },
-            done: () => void,
-          ) => {
+          set: async ({ value, scope }: { value: unknown; scope: string }) => {
             if (scope === "regular") {
               regular = value;
               owner = "controlled_by_this_extension";
@@ -164,9 +137,8 @@ beforeEach(() => {
             const hook = onProxySet;
             onProxySet = undefined;
             hook?.();
-            done();
           },
-          clear: ({ scope }: { scope: string }, done: () => void) => {
+          clear: async ({ scope }: { scope: string }) => {
             if (scope === "regular") {
               regular = { mode: "system" };
               owner = "controllable_by_this_extension";
@@ -174,38 +146,33 @@ beforeEach(() => {
               privateProxy = undefined;
               privateOwner = undefined;
             }
-            done();
           },
         },
       },
       privacy: {
         network: {
           webRTCIPHandlingPolicy: {
-            get: (_: unknown, done: (value: unknown) => void) =>
-              done({ value: rtc, levelOfControl: rtcOwner }),
-            set: ({ value }: { value: unknown }, done: () => void) => {
+            get: async () => ({ value: rtc, levelOfControl: rtcOwner }),
+            set: async ({ value }: { value: unknown }) => {
               rtc = value;
               rtcOwner = "controlled_by_this_extension";
-              done();
             },
-            clear: (_: unknown, done: () => void) => {
+            clear: async () => {
               rtc = "default";
               rtcOwner = "controllable_by_this_extension";
-              done();
             },
           },
           networkPredictionEnabled: {
-            get: (_: unknown, done: (value: unknown) => void) =>
-              done({
-                value: true,
-                levelOfControl: "controllable_by_this_extension",
-              }),
+            get: async () => ({
+              value: true,
+              levelOfControl: "controllable_by_this_extension",
+            }),
           },
         },
       },
       action: {
-        setBadgeText: (_: unknown, done: () => void) => done(),
-        setBadgeBackgroundColor: (_: unknown, done: () => void) => done(),
+        setBadgeText: async () => undefined,
+        setBadgeBackgroundColor: async () => undefined,
       },
     },
   });
@@ -443,6 +410,19 @@ test("private disable installs a confirmed session-only DIRECT override, not reg
   expect(result.incognitoProxy.settingScope).toBe("incognito_session_only");
   expect(privateProxy).toEqual({ mode: "direct" });
 });
+test("random mode stays off until the session pool has an online server", async () => {
+  const controller = new Controller(routingCore);
+  const result = await controller.client({
+    type: "settings.update",
+    patch: { randomMode: true },
+  });
+  expect(result.ok).toBe(false);
+  if (result.ok) throw new Error("Random mode accepted an empty pool");
+  expect(result.error.message).toContain("server list");
+  expect(writes).toBe(0);
+  expect(regular).toEqual({ mode: "system" });
+  expect((await snapshot(controller)).settings.routing.randomMode).toBe(false);
+});
 test("privacy denial does not claim an override", async () => {
   privacyPermission = false;
   const controller = new Controller(routingCore);
@@ -584,8 +564,8 @@ test("last private-window closure still invalidates a mutation after PAC applica
 
 // These persistence regressions deliberately use the real routing validators and PAC.
 describe("real-core persisted routing", () => {
-  function installedPac() {
-    const value = regular as {
+  function installedPac(setting: unknown = regular) {
+    const value = setting as {
       pacScript: { mandatory: boolean; data: string };
     };
     expect(value.pacScript.mandatory).toBe(true);
@@ -830,6 +810,70 @@ describe("real-core persisted routing", () => {
     expect(installedPac()("https://example.org", "example.org")).toBe(before);
     expect(installedPac()("https://site.example", "site.example")).toBe(before);
     expect(before).toBe("SOCKS5 185.213.154.69:1080");
+  });
+  test("server cache keeps its fetch time across worker restarts", async () => {
+    await refresh(new Controller(), [wire]);
+    const cached = local["servers.v1"] as {
+      value: unknown[];
+      updatedAt: number;
+    };
+    expect(cached.updatedAt).toBeGreaterThan(0);
+    expect((await snapshot(new Controller())).servers).toMatchObject({
+      status: "ready",
+      updatedAt: cached.updatedAt,
+    });
+    // Lists cached before fetch times were stored still load, with an unknown time.
+    local["servers.v1"] = cached.value;
+    expect((await snapshot(new Controller())).servers).toMatchObject({
+      status: "ready",
+      updatedAt: 0,
+    });
+  });
+  test("a stored relay list is not reported as a failed refresh", async () => {
+    const controller = new Controller();
+    await controller.client({
+      type: "settings.update",
+      patch: { enabled: true },
+    });
+    Object.assign(chrome.proxy.settings, {
+      set: async () => {
+        throw new Error("set failed");
+      },
+    });
+    const fetcher = spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify([wire])),
+    );
+    try {
+      const result = await controller.client({ type: "servers.refresh" });
+      expect(result.ok).toBe(false);
+      if (result.ok) throw new Error("Proxy write failure was hidden");
+      expect(result.error.message).not.toContain("refresh failed");
+    } finally {
+      fetcher.mockRestore();
+    }
+    expect(local["servers.v1"]).toMatchObject({
+      value: [{ id: wire.hostname }],
+    });
+  });
+  test("server refresh re-applies an active private override", async () => {
+    const controller = new Controller();
+    await refresh(controller, [wire]);
+    expect(
+      (
+        await controller.client({
+          type: "server.select",
+          serverId: wire.hostname,
+          context: "incognito",
+        })
+      ).ok,
+    ).toBe(true);
+    await refresh(controller, [{ ...wire, ipv4_address: "185.213.154.99" }]);
+    expect(
+      (await snapshot(controller, "incognito")).incognitoProxy.applied,
+    ).toBe(true);
+    expect(
+      installedPac(privateProxy)("https://example.org", "example.org"),
+    ).toBe("SOCKS5 185.213.154.99:1080");
   });
   test("invalid imports cannot mutate proxy or storage", async () => {
     const controller = new Controller();

@@ -10,7 +10,7 @@ import {
   type Snapshot,
 } from "../shared/state";
 import { emptyDiagnostics, runDiagnostics } from "./diagnostics";
-import { callback, object, requestJson, voidCallback } from "./platform";
+import { object, requestJson } from "./platform";
 import {
   defaults,
   read,
@@ -37,6 +37,7 @@ class Failure extends Error {
 const STATE = "state.v1";
 const SESSION = "session.v1";
 const CACHE = "servers.v1";
+type Setting = chrome.types.ChromeSettingGetResult<unknown>;
 function ownership(input: unknown): ProxyOwnership {
   return input === "not_controllable" ||
     input === "controlled_by_other_extensions" ||
@@ -44,6 +45,28 @@ function ownership(input: unknown): ProxyOwnership {
     input === "controlled_by_this_extension"
     ? input
     : "unknown";
+}
+function proxySetting(context: BrowserContext): Promise<Setting> {
+  return chrome.proxy.settings.get({ incognito: context === "incognito" });
+}
+function isPac(setting: Setting, data: string): boolean {
+  const value = setting.value;
+  return (
+    setting.levelOfControl === "controlled_by_this_extension" &&
+    object(value) &&
+    value.mode === "pac_script" &&
+    object(value.pacScript) &&
+    value.pacScript.data === data &&
+    value.pacScript.mandatory === true
+  );
+}
+function isDirectOverride(setting: Setting): boolean {
+  return (
+    setting.levelOfControl === "controlled_by_this_extension" &&
+    Boolean(setting.incognitoSpecific) &&
+    object(setting.value) &&
+    setting.value.mode === "direct"
+  );
 }
 export function trustedSender(
   sender: chrome.runtime.MessageSender,
@@ -74,11 +97,7 @@ export class Controller {
   constructor(
     private readonly routingCore: Pick<
       typeof core,
-      | "canonicalHost"
-      | "generatePac"
-      | "validateCommand"
-      | "validateImport"
-      | "validateServers"
+      "generatePac" | "validateCommand" | "validateImport" | "validateServers"
     > = core,
   ) {}
   private tail: Promise<unknown> = Promise.resolve();
@@ -89,30 +108,59 @@ export class Controller {
   private privateEpoch = 0;
   private startupError = false;
   private privateWindows = new Set<number>();
-  private async allowed(): Promise<boolean> {
-    return callback<boolean>((done) =>
-      chrome.extension.isAllowedIncognitoAccess(done),
-    );
+  private allowed(): Promise<boolean> {
+    return chrome.extension.isAllowedIncognitoAccess();
   }
   private async privateOpen(): Promise<boolean> {
-    return (
-      await callback<chrome.windows.Window[]>((done) =>
-        chrome.windows.getAll({}, done),
-      )
-    ).some((window) => window.incognito);
+    return (await chrome.windows.getAll({})).some((window) => window.incognito);
   }
-  private async permission(name: "proxy" | "privacy"): Promise<boolean> {
-    return callback<boolean>((done) =>
-      chrome.permissions.contains({ permissions: [name] }, done),
-    );
+  private async privateUsable(): Promise<boolean> {
+    return (await this.allowed()) && (await this.privateOpen());
+  }
+  private permission(name: "proxy" | "privacy"): Promise<boolean> {
+    return chrome.permissions.contains({ permissions: [name] });
+  }
+  private saveSession(): Promise<void> {
+    return write(chrome.storage.session, SESSION, this.session);
+  }
+  private async savePrivateWindows(): Promise<void> {
+    if (!this.session.privateState) return;
+    this.session.privateWindows = [...this.privateWindows];
+    await this.saveSession();
+  }
+  private async endPrivate(): Promise<void> {
+    delete this.session.privateState;
+    delete this.session.privateSeed;
+    delete this.session.privateWindows;
+    // Before initialization this.session is a placeholder that must not replace the stored seed.
+    if (this.initialized) await this.saveSession();
+  }
+  private async clearPrivateOverride(): Promise<void> {
+    const setting = await proxySetting("incognito");
+    if (
+      setting.levelOfControl === "controlled_by_this_extension" &&
+      setting.incognitoSpecific
+    )
+      await chrome.proxy.settings.clear({ scope: "incognito_session_only" });
+  }
+  private enqueue(task: () => Promise<void>): void {
+    this.tail = this.tail
+      .catch(() => undefined)
+      .then(task)
+      .catch(() => undefined);
   }
   private async initialize(): Promise<void> {
     if (this.initialized) return;
     const cache = await read(chrome.storage.local, CACHE);
     if (cache !== undefined) {
       try {
-        const pool = validPool(cache);
-        this.servers = { status: "ready", value: pool, updatedAt: 0 };
+        // Caches written before fetch times were stored are plain lists.
+        const { value, updatedAt } = object(cache)
+          ? cache
+          : { value: cache, updatedAt: 0 };
+        if (typeof updatedAt !== "number" || !Number.isSafeInteger(updatedAt))
+          throw new Error("Invalid server cache");
+        this.servers = { status: "ready", value: validPool(value), updatedAt };
       } catch {
         this.servers = {
           status: "error",
@@ -120,11 +168,8 @@ export class Controller {
         };
       }
     }
-    const windows = await callback<chrome.windows.Window[]>((done) =>
-      chrome.windows.getAll({}, done),
-    );
     this.privateWindows = new Set(
-      windows
+      (await chrome.windows.getAll({}))
         .filter((window) => window.incognito && window.id !== undefined)
         .map((window) => window.id as number),
     );
@@ -168,11 +213,11 @@ export class Controller {
       /^[a-f0-9-]{36}$/.test(rawSession.privateSeed) &&
       (await this.privateOpen())
     ) {
-      this.session.privateSeed = rawSession.privateSeed as string;
+      this.session.privateSeed = rawSession.privateSeed;
       this.session.privateWindows = [...this.privateWindows];
       this.session.privateState = validateStored(rawSession.privateState);
     }
-    await write(chrome.storage.session, SESSION, this.session);
+    await this.saveSession();
     this.initialized = true;
     if (!this.startupError) {
       // Chrome retains PAC across worker suspension; reconcile only validated state.
@@ -208,16 +253,15 @@ export class Controller {
     });
   }
   private async effective(context: BrowserContext): Promise<ProxyStatus> {
-    const permitted = await this.permission("proxy");
     const result: ProxyStatus = {
       scope: context,
       settingScope: "unknown",
       ownership: "unknown",
-      permissionGranted: permitted,
+      permissionGranted: await this.permission("proxy"),
       applied: false,
       status: "blocked",
     };
-    if (!permitted) {
+    if (!result.permissionGranted) {
       result.message = "Proxy permission is not available.";
       return result;
     }
@@ -226,45 +270,21 @@ export class Controller {
       return result;
     }
     try {
-      const details = await callback<
-        chrome.types.ChromeSettingGetResult<unknown>
-      >((done) =>
-        chrome.proxy.settings.get({ incognito: context === "incognito" }, done),
-      );
-      result.ownership = ownership(details.levelOfControl);
-      const expected =
-        context === "incognito"
-          ? (this.session.privateState ?? this.state)
-          : this.state;
-      const value: unknown = details.value;
+      const setting = await proxySetting(context);
+      result.ownership = ownership(setting.levelOfControl);
+      const privateState =
+        context === "incognito" ? this.session.privateState : undefined;
+      const expected = privateState ?? this.state;
       result.applied =
-        result.ownership === "controlled_by_this_extension" &&
         this.active(expected) &&
-        object(value) &&
-        value.mode === "pac_script" &&
-        object(value.pacScript) &&
-        value.pacScript.data ===
-          this.pac(
-            expected,
-            context === "incognito" && this.session.privateState
-              ? "incognito"
-              : "regular",
-          ) &&
-        value.pacScript.mandatory === true;
-      if (
-        context === "incognito" &&
-        result.ownership === "controlled_by_this_extension" &&
-        details.incognitoSpecific &&
-        object(value) &&
-        value.mode === "direct" &&
-        this.session.privateState
-      )
-        result.settingScope = "incognito_session_only";
+        isPac(setting, this.pac(expected, privateState ? context : "regular"));
       if (result.applied)
         result.settingScope =
-          context === "incognito" && details.incognitoSpecific
+          context === "incognito" && setting.incognitoSpecific
             ? "incognito_session_only"
             : "regular";
+      else if (privateState && isDirectOverride(setting))
+        result.settingScope = "incognito_session_only";
       result.status =
         result.ownership === "controlled_by_other_extensions" ||
         result.ownership === "not_controllable"
@@ -299,87 +319,38 @@ export class Controller {
       return;
     }
     if (this.active(state)) {
-      const existing = await callback<
-        chrome.types.ChromeSettingGetResult<unknown>
-      >((done) =>
-        chrome.proxy.settings.get({ incognito: context === "incognito" }, done),
-      );
-      const existingValue = existing.value;
-      if (
-        existing.levelOfControl === "controlled_by_this_extension" &&
-        object(existingValue) &&
-        existingValue.mode === "pac_script" &&
-        object(existingValue.pacScript) &&
-        existingValue.pacScript.data === this.pac(state, context) &&
-        existingValue.pacScript.mandatory === true
-      )
-        return;
-      await voidCallback((done) =>
-        chrome.proxy.settings.set(
-          {
-            value: {
-              mode: "pac_script",
-              pacScript: { data: this.pac(state, context), mandatory: true },
-            },
-            scope: this.scope(context),
-          },
-          done,
-        ),
-      );
-      const confirmation = await callback<
-        chrome.types.ChromeSettingGetResult<unknown>
-      >((done) =>
-        chrome.proxy.settings.get({ incognito: context === "incognito" }, done),
-      );
-      const value: unknown = confirmation.value;
-      if (
-        confirmation.levelOfControl !== "controlled_by_this_extension" ||
-        !object(value) ||
-        value.mode !== "pac_script" ||
-        !object(value.pacScript) ||
-        value.pacScript.data !== this.pac(state, context) ||
-        value.pacScript.mandatory !== true
-      )
+      const data = this.pac(state, context);
+      if (isPac(await proxySetting(context), data)) return;
+      await chrome.proxy.settings.set({
+        value: { mode: "pac_script", pacScript: { data, mandatory: true } },
+        scope: this.scope(context),
+      });
+      if (!isPac(await proxySetting(context), data))
         throw new Failure(
           "blocked",
           "Chrome did not confirm the requested mandatory PAC.",
         );
     } else if (context === "incognito") {
-      const existing = await callback<
-        chrome.types.ChromeSettingGetResult<unknown>
-      >((done) => chrome.proxy.settings.get({ incognito: true }, done));
-      if (
-        existing.levelOfControl === "controlled_by_this_extension" &&
-        existing.incognitoSpecific &&
-        object(existing.value) &&
-        existing.value.mode === "direct"
-      )
-        return;
-      await voidCallback((done) =>
-        chrome.proxy.settings.set(
-          { value: { mode: "direct" }, scope: "incognito_session_only" },
-          done,
-        ),
-      );
-      const confirmation = await callback<
-        chrome.types.ChromeSettingGetResult<unknown>
-      >((done) => chrome.proxy.settings.get({ incognito: true }, done));
-      if (
-        confirmation.levelOfControl !== "controlled_by_this_extension" ||
-        !confirmation.incognitoSpecific ||
-        !object(confirmation.value) ||
-        confirmation.value.mode !== "direct"
-      )
+      if (isDirectOverride(await proxySetting(context))) return;
+      await chrome.proxy.settings.set({
+        value: { mode: "direct" },
+        scope: "incognito_session_only",
+      });
+      if (!isDirectOverride(await proxySetting(context)))
         throw new Failure(
           "blocked",
           "Chrome did not confirm the private-session direct override.",
         );
     } else if (current.ownership === "controlled_by_this_extension") {
       // An inherited regular setting must not be cleared from the private scope.
-      await voidCallback((done) =>
-        chrome.proxy.settings.clear({ scope: this.scope(context) }, done),
-      );
+      await chrome.proxy.settings.clear({ scope: this.scope(context) });
     }
+  }
+  private async reconcileAll(): Promise<void> {
+    if (!(await this.privateUsable())) await this.endPrivate();
+    await this.reconcile(this.state, "regular", false);
+    if (this.session.privateState)
+      await this.reconcile(this.session.privateState, "incognito", false);
   }
   private async privacy(): Promise<PrivacyStatus> {
     const result: PrivacyStatus = {
@@ -388,12 +359,10 @@ export class Controller {
       networkPrediction: { ownership: "unknown", value: null },
     };
     if (!result.permissionGranted) return result;
-    const rtc = await callback<chrome.types.ChromeSettingGetResult<unknown>>(
-      (done) => chrome.privacy.network.webRTCIPHandlingPolicy.get({}, done),
-    );
-    const prediction = await callback<
-      chrome.types.ChromeSettingGetResult<unknown>
-    >((done) => chrome.privacy.network.networkPredictionEnabled.get({}, done));
+    const [rtc, prediction] = await Promise.all([
+      chrome.privacy.network.webRTCIPHandlingPolicy.get({}),
+      chrome.privacy.network.networkPredictionEnabled.get({}),
+    ]);
     result.webRtc = {
       ownership: ownership(rtc.levelOfControl),
       value: typeof rtc.value === "string" ? rtc.value : null,
@@ -427,24 +396,16 @@ export class Controller {
               "Private proxy settings are not inspected from regular windows.",
           };
     await Promise.all([
-      voidCallback((done) =>
-        chrome.action.setBadgeText(
-          {
-            text: proxy.applied
-              ? "ON"
-              : proxy.status === "blocked" || proxy.status === "error"
-                ? "!"
-                : "",
-          },
-          done,
-        ),
-      ),
-      voidCallback((done) =>
-        chrome.action.setBadgeBackgroundColor(
-          { color: proxy.applied ? "#44ad4d" : "#d98c00" },
-          done,
-        ),
-      ),
+      chrome.action.setBadgeText({
+        text: proxy.applied
+          ? "ON"
+          : proxy.status === "blocked" || proxy.status === "error"
+            ? "!"
+            : "",
+      }),
+      chrome.action.setBadgeBackgroundColor({
+        color: proxy.applied ? "#44ad4d" : "#d98c00",
+      }),
     ]);
     const settings = structuredClone(state.settings);
     settings.preferences.autoReload =
@@ -473,10 +434,7 @@ export class Controller {
       context === "incognito"
         ? (this.session.privateState ?? this.state)
         : this.state;
-    if (
-      context === "incognito" &&
-      (!(await this.allowed()) || !(await this.privateOpen()))
-    )
+    if (context === "incognito" && !(await this.privateUsable()))
       throw new Failure("blocked", "No opted-in private window is open.");
     try {
       if (context === "incognito") {
@@ -497,15 +455,8 @@ export class Controller {
         };
         await write(chrome.storage.session, SESSION, session);
         this.session = session;
-        if (
-          epoch !== this.privateEpoch ||
-          !(await this.privateOpen()) ||
-          !(await this.allowed())
-        ) {
-          delete this.session.privateState;
-          delete this.session.privateSeed;
-          delete this.session.privateWindows;
-          await write(chrome.storage.session, SESSION, this.session);
+        if (epoch !== this.privateEpoch || !(await this.privateUsable())) {
+          await this.endPrivate();
           throw new Failure(
             "blocked",
             "Private session ended during storage update.",
@@ -516,24 +467,10 @@ export class Controller {
       if (
         routing &&
         (context === "regular" ||
-          (epoch === this.privateEpoch &&
-            (await this.privateOpen()) &&
-            (await this.allowed())))
+          (epoch === this.privateEpoch && (await this.privateUsable())))
       )
         if (context === "incognito" && !hadPrivateState) {
-          const current = await callback<
-            chrome.types.ChromeSettingGetResult<unknown>
-          >((done) => chrome.proxy.settings.get({ incognito: true }, done));
-          if (
-            current.levelOfControl === "controlled_by_this_extension" &&
-            current.incognitoSpecific
-          )
-            await voidCallback((done) =>
-              chrome.proxy.settings.clear(
-                { scope: "incognito_session_only" },
-                done,
-              ),
-            );
+          await this.clearPrivateOverride();
           delete this.session.privateSeed;
           delete this.session.privateWindows;
         } else await this.reconcile(previous, context, false);
@@ -542,10 +479,7 @@ export class Controller {
   }
   private async dispatch(command: Command): Promise<unknown> {
     const context = command.context ?? "regular";
-    if (
-      context === "incognito" &&
-      (!(await this.allowed()) || !(await this.privateOpen()))
-    )
+    if (context === "incognito" && !(await this.privateUsable()))
       throw new Failure(
         "blocked",
         "Incognito requires Chrome opt-in and an open private window.",
@@ -560,11 +494,6 @@ export class Controller {
       this.state.settings.preferences.autoReload;
     next.revision++;
     const routing = next.settings.routing;
-    const host = (input: string): string => {
-      const result = this.routingCore.canonicalHost(input);
-      if (!result.ok) throw new Failure("invalid-input", result.error);
-      return result.value;
-    };
     const checkServer = (id: string) => {
       if (
         id !== INTERNAL_DEFAULT_SERVER_ID &&
@@ -572,6 +501,7 @@ export class Controller {
       )
         throw new Failure("invalid-input", "Select a known online server.");
     };
+    // validateCommand has already canonicalized every host in the command.
     switch (command.type) {
       case "snapshot":
         return this.snapshot(context);
@@ -633,11 +563,11 @@ export class Controller {
       }
       case "server.select": {
         checkServer(command.serverId);
-        if (command.host) {
-          const name = host(command.host);
-          routing.rules = routing.rules.filter((rule) => rule.host !== name);
+        const site = command.host;
+        if (site) {
+          routing.rules = routing.rules.filter((rule) => rule.host !== site);
           routing.rules.push({
-            host: name,
+            host: site,
             enabled: true,
             serverId: command.serverId,
           });
@@ -671,31 +601,25 @@ export class Controller {
         break;
       }
       case "rule.upsert": {
-        const name = host(command.rule.host);
-        const existing = routing.rules.find((rule) => rule.host === name);
-        if (
-          command.rule.enabled ||
-          !existing ||
-          existing.serverId !== command.rule.serverId
-        )
-          checkServer(command.rule.serverId);
-        routing.rules = routing.rules.filter((rule) => rule.host !== name);
-        routing.rules.push({ ...command.rule, host: name });
+        const { rule } = command;
+        const existing = routing.rules.find((row) => row.host === rule.host);
+        if (rule.enabled || !existing || existing.serverId !== rule.serverId)
+          checkServer(rule.serverId);
+        routing.rules = routing.rules.filter((row) => row.host !== rule.host);
+        routing.rules.push(rule);
         break;
       }
       case "rule.remove":
         routing.rules = routing.rules.filter(
-          (rule) => rule.host !== host(command.host),
+          (rule) => rule.host !== command.host,
         );
         break;
-      case "exclusion.set": {
-        const name = host(command.host);
+      case "exclusion.set":
         routing.exclusions = routing.exclusions.filter(
-          (entry) => entry !== name,
+          (entry) => entry !== command.host,
         );
-        if (command.excluded) routing.exclusions.push(name);
+        if (command.excluded) routing.exclusions.push(command.host);
         break;
-      }
       case "history.clear":
         next.history = [];
         break;
@@ -710,36 +634,31 @@ export class Controller {
             "blocked",
             "Refresh the shared public server catalog from a regular extension window.",
           );
+        const updatedAt = Date.now();
+        let value: Server[];
         try {
           const result = this.routingCore.validateServers(
             await requestJson(
               "https://api.mullvad.net/network/v1-beta1/socks-proxies",
             ),
           );
-          if (!result.ok)
-            throw new Failure(
-              "offline",
-              "Mullvad returned an invalid server catalog.",
-            );
-          await write(chrome.storage.local, CACHE, result.value);
-          this.servers = {
-            status: "ready",
-            value: result.value,
-            updatedAt: Date.now(),
-          };
-          // Freeze the random pool for this browser session, including worker restarts.
-          if (!this.session.pool.length) {
-            this.session.pool = result.value;
-            await write(chrome.storage.session, SESSION, this.session);
-          }
-          await this.reconcile(this.state, "regular", false);
-          return this.snapshot(context);
+          if (!result.ok) throw new Error(result.error);
+          value = result.value;
+          await write(chrome.storage.local, CACHE, { value, updatedAt });
         } catch {
           throw new Failure(
             "offline",
             "Server refresh failed or timed out; cached routing remains in place.",
           );
         }
+        this.servers = { status: "ready", value, updatedAt };
+        // Freeze the random pool for this browser session, including worker restarts.
+        if (!this.session.pool.length) {
+          this.session.pool = value;
+          await this.saveSession();
+        }
+        await this.reconcileAll();
+        return this.snapshot(context);
       }
       case "diagnostics.run": {
         if (context === "incognito")
@@ -765,14 +684,10 @@ export class Controller {
           command.control === "webRtcNonProxiedUdp"
             ? chrome.privacy.network.webRTCIPHandlingPolicy
             : chrome.privacy.network.networkPredictionEnabled;
-        const details = await callback<
-          chrome.types.ChromeSettingGetResult<unknown>
-        >((done) => setting.get({}, done));
+        const details = await setting.get({});
         if (command.type === "privacy.restore") {
           if (details.levelOfControl === "controlled_by_this_extension")
-            await voidCallback((done) =>
-              setting.clear({ scope: "regular" }, done),
-            );
+            await setting.clear({ scope: "regular" });
         } else {
           if (
             ![
@@ -784,29 +699,30 @@ export class Controller {
               "blocked",
               "Another extension or policy controls this privacy setting.",
             );
-          if (command.control === "webRtcNonProxiedUdp") {
-            await voidCallback((done) =>
-              chrome.privacy.network.webRTCIPHandlingPolicy.set(
-                {
-                  value: command.enabled
-                    ? "disable_non_proxied_udp"
-                    : "default",
-                  scope: "regular",
-                },
-                done,
-              ),
-            );
-          } else
-            await voidCallback((done) =>
-              chrome.privacy.network.networkPredictionEnabled.set(
-                { value: command.enabled, scope: "regular" },
-                done,
-              ),
-            );
+          if (command.control === "webRtcNonProxiedUdp")
+            await chrome.privacy.network.webRTCIPHandlingPolicy.set({
+              value: command.enabled ? "disable_non_proxied_udp" : "default",
+              scope: "regular",
+            });
+          else
+            await chrome.privacy.network.networkPredictionEnabled.set({
+              value: command.enabled,
+              scope: "regular",
+            });
         }
         return this.snapshot(context);
       }
     }
+    // An empty frozen pool would make the mandatory PAC block every website.
+    if (
+      next.settings.routing.randomMode &&
+      !state.settings.routing.randomMode &&
+      !this.session.pool.some((server) => server.online)
+    )
+      throw new Failure(
+        "blocked",
+        "Load the server list before turning on random mode.",
+      );
     const routingChanged =
       JSON.stringify(next.settings.routing) !==
       JSON.stringify(state.settings.routing);
@@ -832,9 +748,7 @@ export class Controller {
             "Only this extension's popup/options can issue commands.",
           );
         if (sender && !sender.tab) {
-          const window = await callback<chrome.windows.Window>((done) =>
-            chrome.windows.getLastFocused({}, done),
-          );
+          const window = await chrome.windows.getLastFocused({});
           if (
             Boolean(window.incognito) !==
             (validation.value.context === "incognito")
@@ -869,15 +783,7 @@ export class Controller {
   privateWindowCreated(window: chrome.windows.Window): void {
     if (!window.incognito || window.id === undefined) return;
     this.privateWindows.add(window.id);
-    this.tail = this.tail
-      .catch(() => undefined)
-      .then(async () => {
-        if (this.session.privateState) {
-          this.session.privateWindows = [...this.privateWindows];
-          await write(chrome.storage.session, SESSION, this.session);
-        }
-      })
-      .catch(() => undefined);
+    this.enqueue(() => this.savePrivateWindows());
   }
   privateWindowChanged(windowId?: number): void {
     const removedPrivate =
@@ -892,68 +798,23 @@ export class Controller {
             return allowed;
           })
         : Promise.resolve(true);
-    this.tail = this.tail
-      .catch(() => undefined)
-      .then(async () => {
-        const permitted = await permission;
-        if (
-          !ended &&
-          permitted &&
-          (await this.allowed()) &&
-          (await this.privateOpen())
-        ) {
-          if (this.session.privateState) {
-            this.session.privateWindows = [...this.privateWindows];
-            await write(chrome.storage.session, SESSION, this.session);
-          }
-          return;
-        }
-        delete this.session.privateState;
-        delete this.session.privateSeed;
-        delete this.session.privateWindows;
-        if (this.initialized)
-          await write(chrome.storage.session, SESSION, this.session);
-        // Chrome expires the private PAC at last-window close; also remove a stale
-        // in-flight override if a new private session opened before this queue ran.
-        if (
-          (ended || !permitted) &&
-          (await this.allowed()) &&
-          (await this.privateOpen())
-        ) {
-          const setting = await callback<
-            chrome.types.ChromeSettingGetResult<unknown>
-          >((done) => chrome.proxy.settings.get({ incognito: true }, done));
-          if (
-            setting.levelOfControl === "controlled_by_this_extension" &&
-            setting.incognitoSpecific
-          )
-            await voidCallback((done) =>
-              chrome.proxy.settings.clear(
-                { scope: "incognito_session_only" },
-                done,
-              ),
-            );
-        }
-      })
-      .catch(() => undefined);
+    this.enqueue(async () => {
+      const permitted = await permission;
+      if (!ended && permitted && (await this.privateUsable()))
+        return this.savePrivateWindows();
+      await this.endPrivate();
+      // Chrome expires the private PAC at last-window close; also remove a stale
+      // in-flight override if a new private session opened before this queue ran.
+      if ((ended || !permitted) && (await this.privateUsable()))
+        await this.clearPrivateOverride();
+    });
   }
   refresh(): void {
-    this.tail = this.tail
-      .catch(() => undefined)
-      .then(async () => {
-        await this.initialize();
-        if (!(await this.allowed()) || !(await this.privateOpen())) {
-          delete this.session.privateState;
-          delete this.session.privateSeed;
-          delete this.session.privateWindows;
-          await write(chrome.storage.session, SESSION, this.session);
-        }
-        await this.reconcile(this.state, "regular", false);
-        if (this.session.privateState)
-          await this.reconcile(this.session.privateState, "incognito", false);
-        await this.snapshot("regular");
-      })
-      .catch(() => undefined);
+    this.enqueue(async () => {
+      await this.initialize();
+      await this.reconcileAll();
+      await this.snapshot("regular");
+    });
   }
 }
 export const controller = new Controller();

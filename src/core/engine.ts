@@ -3,6 +3,10 @@ import type { RouteDecision, RoutingContext } from "../shared/state";
 
 // This closure is serialized into PAC: keep it platform-independent and self-contained.
 export function createEngine(domainOf: (host: string) => string | null) {
+  // PAC reuses one context for every request, so sort its random pool once.
+  // Callers must pass a new context object after changing its servers.
+  let poolContext: RoutingContext | undefined;
+  let pool: RoutingContext["servers"] = [];
   function ipv4(host: string): number[] | null {
     if (!/^\d+\.\d+\.\d+\.\d+$/.test(host)) return null;
     const bytes = host.split(".").map(Number);
@@ -95,10 +99,12 @@ export function createEngine(domainOf: (host: string) => string | null) {
           kind: "blocked",
           reason: "Random routing requires a persisted session seed",
         };
-      const pool = context.servers
-        .filter((s) => s.online)
-        .slice()
-        .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      if (poolContext !== context) {
+        poolContext = context;
+        pool = context.servers
+          .filter((s) => s.online)
+          .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+      }
       if (!pool.length)
         return { kind: "blocked", reason: "No online random proxy servers" };
       let hash = 2166136261;

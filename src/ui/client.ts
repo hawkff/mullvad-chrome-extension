@@ -210,6 +210,8 @@ export function searchServers(servers: Server[], query: string): Server[] {
     );
 }
 export function freshness(state: LoadState<unknown>): string {
+  if (state.status === "ready" && !state.updatedAt)
+    return "Cached data from an unknown time; refresh to update";
   if (state.status === "ready")
     return `${Date.now() - state.updatedAt > 86400000 ? "Stale cached data" : "Fresh cached data"} · ${new Date(state.updatedAt).toLocaleString()}`;
   if (state.status === "unknown" || state.status === "pending")
@@ -235,20 +237,13 @@ export function incognitoScopeDescription(proxy: ProxyStatus): string {
   }
 }
 
-export function resolveUiContext(): Promise<"regular" | "incognito"> {
-  return new Promise((resolve, reject) => {
-    chrome.windows.getCurrent({}, (window) => {
-      if (chrome.runtime.lastError || typeof window?.incognito !== "boolean") {
-        reject(
-          new Error(
-            "Cannot determine this window's browsing context. Close and reopen this page.",
-          ),
-        );
-        return;
-      }
-      resolve(window.incognito ? "incognito" : "regular");
-    });
-  });
+export async function resolveUiContext(): Promise<BrowserContext> {
+  const window = await chrome.windows.getCurrent({}).catch(() => undefined);
+  if (typeof window?.incognito !== "boolean")
+    throw new Error(
+      "Cannot determine this window's browsing context. Close and reopen this page.",
+    );
+  return window.incognito ? "incognito" : "regular";
 }
 
 export async function currentWebsiteTab(
@@ -258,12 +253,8 @@ export async function currentWebsiteTab(
     throw new Error(
       "Tab access is unavailable. Enable active-website reload again in regular settings to grant access, or reload manually.",
     );
-  const window = await new Promise<chrome.windows.Window>((resolve, reject) => {
-    chrome.windows.getCurrent({}, (value) => {
-      if (chrome.runtime.lastError)
-        reject(new Error("Cannot read this browsing window."));
-      else resolve(value);
-    });
+  const window = await chrome.windows.getCurrent({}).catch(() => {
+    throw new Error("Cannot read this browsing window.");
   });
   if (
     typeof window.id !== "number" ||

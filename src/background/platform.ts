@@ -1,19 +1,3 @@
-export function callback<T>(
-  invoke: (done: (value: T) => void) => void,
-): Promise<T> {
-  return new Promise((resolve, reject) => {
-    invoke((value) => {
-      const error = chrome.runtime.lastError;
-      if (error) reject(new Error(error.message || "Chrome API failed"));
-      else resolve(value);
-    });
-  });
-}
-export function voidCallback(
-  invoke: (done: () => void) => void,
-): Promise<void> {
-  return callback<void>(invoke);
-}
 export function object(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

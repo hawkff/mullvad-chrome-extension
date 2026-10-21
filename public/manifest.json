@@ -11,7 +11,6 @@
   "optional_permissions": ["privacy", "tabs"],
   "host_permissions": [
     "https://api.mullvad.net/*",
-    "https://am.i.mullvad.net/*",
     "https://ipv4.am.i.mullvad.net/*",
     "https://ipv6.am.i.mullvad.net/*",
     "https://*.dnsleak.am.i.mullvad.net/*"

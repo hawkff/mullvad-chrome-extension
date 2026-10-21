@@ -12,7 +12,6 @@ test("manifest confines extension execution and network access", () => {
   expect(manifest.optional_permissions).toEqual(["privacy", "tabs"]);
   expect(manifest.host_permissions).toEqual([
     "https://api.mullvad.net/*",
-    "https://am.i.mullvad.net/*",
     "https://ipv4.am.i.mullvad.net/*",
     "https://ipv6.am.i.mullvad.net/*",
     "https://*.dnsleak.am.i.mullvad.net/*",

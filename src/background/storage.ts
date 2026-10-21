@@ -1,6 +1,6 @@
 import { validatePersistedSettings } from "../core/index";
 import type { HistoryEntry, Server, Settings } from "../shared/state";
-import { callback, object, voidCallback } from "./platform";
+import { object } from "./platform";
 export interface Stored {
   version: 1;
   revision: number;
@@ -96,18 +96,16 @@ export function validPool(input: unknown): Server[] {
     return row as unknown as Server;
   });
 }
-export function read(
+export async function read(
   area: chrome.storage.StorageArea,
   key: string,
 ): Promise<unknown> {
-  return callback<Record<string, unknown>>((done) => area.get(key, done)).then(
-    (value) => value[key],
-  );
+  return (await area.get(key))[key];
 }
 export function write(
   area: chrome.storage.StorageArea,
   key: string,
   value: unknown,
 ): Promise<void> {
-  return voidCallback((done) => area.set({ [key]: value }, done));
+  return area.set({ [key]: value });
 }

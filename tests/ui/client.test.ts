@@ -92,6 +92,9 @@ test("freshness distinguishes unknown, blocked and stale data", () => {
   expect(freshness({ status: "ready", updatedAt: 1, value: [] })).toContain(
     "Stale cached data",
   );
+  expect(freshness({ status: "ready", updatedAt: 0, value: [] })).toContain(
+    "unknown time",
+  );
   expect(
     freshness({ status: "ready", updatedAt: Date.now(), value: [] }),
   ).toContain("Fresh cached data");
@@ -124,29 +127,24 @@ test("window context resolves before UI mount and never defaults on failure", as
     for (const incognito of [true, false]) {
       Object.defineProperty(globalThis, "chrome", {
         configurable: true,
-        value: {
-          windows: {
-            getCurrent: (_options: object, done: (window: object) => void) =>
-              done({ incognito }),
-          },
-          runtime: {},
-        },
+        value: { windows: { getCurrent: async () => ({ incognito }) } },
       });
       expect(await resolveUiContext()).toBe(
         incognito ? "incognito" : "regular",
       );
     }
-    Object.defineProperty(globalThis, "chrome", {
-      configurable: true,
-      value: {
-        windows: {
-          getCurrent: (_options: object, done: (window: object) => void) =>
-            done({}),
-        },
-        runtime: { lastError: { message: "unavailable" } },
+    for (const getCurrent of [
+      async () => ({}),
+      async () => {
+        throw new Error("unavailable");
       },
-    });
-    await expect(resolveUiContext()).rejects.toThrow("Cannot determine");
+    ]) {
+      Object.defineProperty(globalThis, "chrome", {
+        configurable: true,
+        value: { windows: { getCurrent } },
+      });
+      await expect(resolveUiContext()).rejects.toThrow("Cannot determine");
+    }
   } finally {
     if (previous) Object.defineProperty(globalThis, "chrome", previous);
     else Reflect.deleteProperty(globalThis, "chrome");
@@ -169,11 +167,7 @@ test("active website lookup uses its hosting window and rejects stale/unsafe tar
       configurable: true,
       value: {
         permissions: { contains: async () => allowed },
-        runtime: {},
-        windows: {
-          getCurrent: (_options: object, done: (window: object) => void) =>
-            done(window),
-        },
+        windows: { getCurrent: async () => window },
         tabs: {
           query: async (query: object) => {
             expect(query).toEqual({ active: true, windowId: 7 });

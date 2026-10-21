@@ -423,6 +423,30 @@ test("real extension Incognito messages, session expiry and worker restart", asy
     expect(fresh.value.incognitoProxy.settingScope).toBe("regular");
     expect(await local(regular)).toEqual(baseline);
     await evaluate(regular, `chrome.windows.remove(${reopened.window.id})`);
+    expect(
+      await message(regular, {
+        type: "settings.update",
+        patch: { randomMode: true },
+      }),
+    ).toMatchObject({ ok: false, error: { code: "blocked" } });
+    // A labeled controlled catalog allows random routing and Firefox endpoint conversion without a live VPN/API.
+    const catalog = validateServers(
+      await Bun.file("tests/core/fixtures/servers.json").json(),
+    );
+    expect(catalog.ok).toBe(true);
+    await evaluate(
+      regular,
+      `chrome.storage.local.set({'servers.v1':${JSON.stringify({ value: catalog.value, updatedAt: Date.now() })}})`,
+    );
+    const controlledSession = (await session(regular))["session.v1"];
+    await evaluate(
+      regular,
+      `chrome.storage.session.set({'session.v1':${JSON.stringify({ ...controlledSession, pool: catalog.value })}})`,
+    );
+    const cachedWorker = (await chrome.targets()).find(
+      (target) => target.type === "service_worker",
+    );
+    await chrome.browser("Target.closeTarget", { targetId: cachedWorker.id });
     const random = await message(regular, {
       type: "settings.update",
       patch: { randomMode: true },
@@ -447,31 +471,8 @@ test("real extension Incognito messages, session expiry and worker restart", asy
     expect((await session(regular))["session.v1"].pool).toEqual(
       before["session.v1"].pool,
     );
-    expect(before["session.v1"].seed).toBeTruthy();
-    // A labeled controlled catalog allows Firefox endpoint conversion without a live VPN/API.
-    const catalog = validateServers(
-      await Bun.file("tests/core/fixtures/servers.json").json(),
-    );
-    expect(catalog.ok).toBe(true);
-    await evaluate(
-      regular,
-      `chrome.storage.local.set({'servers.v1':${JSON.stringify(catalog.value)}})`,
-    );
-    const controlledSession = (await session(regular))["session.v1"];
-    await evaluate(
-      regular,
-      `chrome.storage.session.set({'session.v1':${JSON.stringify({ ...controlledSession, pool: catalog.value })}})`,
-    );
-    const cachedWorker = (await chrome.targets()).find(
-      (target) => target.type === "service_worker",
-    );
-    await chrome.browser("Target.closeTarget", { targetId: cachedWorker.id });
-    const resumed = await message(regular, { type: "snapshot" });
-    expect(resumed.value.settings.routing.randomMode).toBe(true);
-    expect((await session(regular))["session.v1"].seed).toBe(
-      controlledSession.seed,
-    );
-    expect((await session(regular))["session.v1"].pool).toEqual(catalog.value);
+    expect(before["session.v1"].seed).toBe(controlledSession.seed);
+    expect(before["session.v1"].pool).toEqual(catalog.value);
     const firefox = await Bun.file("tests/core/fixtures/firefox.json").json();
     const imported = await message(regular, {
       type: "settings.import",
