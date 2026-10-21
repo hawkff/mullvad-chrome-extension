@@ -615,6 +615,81 @@ describe("real-core persisted routing", () => {
       fetcher.mockRestore();
     }
   }
+  for (const availability of ["offline", "absent"]) {
+    test(`existing ${availability} rule can be disabled without admitting unresolved targets`, async () => {
+      const controller = new Controller();
+      await refresh(controller, [wire, extra]);
+      await controller.client({
+        type: "settings.update",
+        patch: { enabled: true },
+      });
+      for (const rule of [
+        { host: "example.com", enabled: true, serverId: "internal-default" },
+        { host: "unrelated.example", enabled: true, serverId: extra.hostname },
+        { host: "child.example.com", enabled: true, serverId: wire.hostname },
+      ]) {
+        expect(
+          (await controller.client({ type: "rule.upsert", rule })).ok,
+        ).toBe(true);
+      }
+      await refresh(
+        controller,
+        availability === "offline"
+          ? [{ ...wire, online: false }, extra]
+          : [extra],
+      );
+      const restarted = new Controller();
+      const before = await snapshot(restarted);
+      expect(() =>
+        installedPac()("https://child.example.com", "child.example.com"),
+      ).toThrow(/Missing/);
+      const saved = structuredClone(local["state.v1"]) as {
+        revision: number;
+        settings: Snapshot["settings"];
+        history: Snapshot["history"];
+      };
+      const cache = structuredClone(local["servers.v1"]);
+      const sessionBefore = structuredClone(session);
+      const writesBefore = writes;
+      expect(
+        (
+          await restarted.client({
+            type: "rule.upsert",
+            rule: {
+              host: "CHILD.Example.COM.",
+              enabled: false,
+              serverId: wire.hostname,
+            },
+          })
+        ).ok,
+      ).toBe(true);
+      const after = await snapshot(restarted);
+      const expected = structuredClone(saved);
+      expected.revision++;
+      expected.settings.routing.rules[2].enabled = false;
+      expect(local["state.v1"]).toEqual(expected);
+      expect(local["servers.v1"]).toEqual(cache);
+      expect(session).toEqual(sessionBefore);
+      expect(writes).toBe(writesBefore + 1);
+      expect(after.history).toEqual(before.history);
+      // Disabling falls through to the enabled parent route, not a DIRECT override.
+      expect(
+        installedPac()("https://child.example.com", "child.example.com"),
+      ).toBe("SOCKS5 10.64.0.1:1080");
+      for (const rule of [
+        { host: "child.example.com", enabled: true, serverId: wire.hostname },
+        { host: "new.example", enabled: false, serverId: wire.hostname },
+        { host: "new.example", enabled: false, serverId: "unknown" },
+        { host: "child.example.com", enabled: false, serverId: "unknown" },
+      ]) {
+        const unchanged = structuredClone({ local, session, regular, writes });
+        expect((await restarted.client({ type: "rule.upsert", rule })).ok).toBe(
+          false,
+        );
+        expect({ local, session, regular, writes }).toEqual(unchanged);
+      }
+    });
+  }
   test("fresh enable chooses internal default and survives worker and browser restart", async () => {
     const controller = new Controller();
     expect(

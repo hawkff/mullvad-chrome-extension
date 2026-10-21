@@ -652,8 +652,14 @@ export class Controller {
         break;
       }
       case "rule.upsert": {
-        checkServer(command.rule.serverId);
         const name = host(command.rule.host);
+        const existing = routing.rules.find((rule) => rule.host === name);
+        if (
+          command.rule.enabled ||
+          !existing ||
+          existing.serverId !== command.rule.serverId
+        )
+          checkServer(command.rule.serverId);
         routing.rules = routing.rules.filter((rule) => rule.host !== name);
         routing.rules.push({ ...command.rule, host: name });
         break;
