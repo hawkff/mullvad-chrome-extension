@@ -43,6 +43,11 @@ for (const development of [false, true]) {
     ]) {
       expect(await Bun.file(join(directory, file)).exists()).toBe(true);
     }
+    const worker = await Bun.file(
+      join(directory, built.background.service_worker),
+    ).text();
+    expect(worker).not.toMatch(/\bimport\s*\(/);
+    expect(worker.includes("mullvadDev")).toBe(development);
     if (!development) {
       expect([...new Bun.Glob("**/*.map").scanSync(directory)]).toEqual([]);
       expect([...new Bun.Glob("**/*debug*").scanSync(directory)]).toEqual([]);

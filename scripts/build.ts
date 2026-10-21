@@ -12,7 +12,8 @@ const result = await Bun.build({
   outdir,
   target: "browser",
   format: "esm",
-  splitting: true,
+  // Extension service workers cannot load modules with dynamic import().
+  splitting: false,
   minify: !development,
   sourcemap: development ? "external" : "none",
   define: {

@@ -407,3 +407,20 @@ test("PSL wildcard and exception parent semantics match the PAC", () => {
   expect(resolveRoute("a.b.ck", ctx).kind).toBe("direct");
   check(ctx, ["a.www.ck", "a.b.ck", "b.ck", "www.ck"]);
 });
+
+test("generated PAC uses only ASCII for Chrome proxy settings", () => {
+  const input = context();
+  const server = input.servers[0];
+  if (!server) throw new Error("Missing fixture server");
+  server.country = "Sverige å 😀";
+  const pac = generatePac(input);
+  expect([...pac].every((character) => character.charCodeAt(0) < 128)).toBe(
+    true,
+  );
+  const sandbox: { FindProxyForURL?: (url: string, host: string) => string } =
+    {};
+  runInNewContext(pac, sandbox);
+  expect(
+    sandbox.FindProxyForURL?.("https://example.com", "example.com"),
+  ).toContain("SOCKS5");
+});

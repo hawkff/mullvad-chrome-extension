@@ -8,7 +8,13 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    container: debian:trixie
     steps:
+      - name: Install runtime prerequisites
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates chromium git unzip
+          chromium --version
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false

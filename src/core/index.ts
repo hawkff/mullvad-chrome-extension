@@ -39,7 +39,12 @@ export function generatePac(context: RoutingContext): string {
     .replace(/</g, "\\u003c")
     .replace(/\u2028/g, "\\u2028")
     .replace(/\u2029/g, "\\u2029");
-  return `var exports=undefined,module=undefined;\n${publicSuffixSource}\nvar routingEngine=(${createEngine.toString()})(function(host){return tldts.getDomain(host);});\nvar routingContext=${data};\nfunction FindProxyForURL(url,host){var route=routingEngine.route(host,routingContext);if(route.kind==="direct")return "DIRECT";if(route.kind==="blocked")throw new Error("Routing blocked: "+route.reason);return "SOCKS5 "+route.endpoint.host+":"+route.endpoint.port;}`;
+  // Chrome rejects non-ASCII PAC data, including embedded suffix tables and metadata.
+  return `var exports=undefined,module=undefined;\n${publicSuffixSource}\nvar routingEngine=(${createEngine.toString()})(function(host){return tldts.getDomain(host);});\nvar routingContext=${data};\nfunction FindProxyForURL(url,host){var route=routingEngine.route(host,routingContext);if(route.kind==="direct")return "DIRECT";if(route.kind==="blocked")throw new Error("Routing blocked: "+route.reason);return "SOCKS5 "+route.endpoint.host+":"+route.endpoint.port;}`.replace(
+    /[^\x20-\x7e\n\r\t]/g,
+    (character) =>
+      `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
 }
 export function validateServers(input: unknown): ValidationResult<Server[]> {
   return checked(() => servers(input));
