@@ -590,24 +590,24 @@ test("real extension Incognito messages, session expiry and worker restart", asy
         .filter((target) => target.type === "page")
         .every((target) => !target.url.startsWith("https://example.co.uk")),
     ).toBe(true);
-    if (Bun.env.BROWSER_EVIDENCE_DIR) {
-      for (const width of [360, 800]) {
-        await regular("Emulation.setDeviceMetricsOverride", {
-          width,
-          height: 850,
-          deviceScaleFactor: 1,
-          mobile: false,
-        });
+    for (const width of [360, 800]) {
+      await regular("Emulation.setDeviceMetricsOverride", {
+        width,
+        height: 850,
+        deviceScaleFactor: 1,
+        mobile: false,
+      });
+      await evaluate(
+        regular,
+        "document.querySelector('label[for=website-domain]').scrollIntoView({block:'start'})",
+      );
+      expect(
         await evaluate(
           regular,
-          "document.querySelector('label[for=website-domain]').scrollIntoView({block:'start'})",
-        );
-        expect(
-          await evaluate(
-            regular,
-            "document.documentElement.scrollWidth <= innerWidth",
-          ),
-        ).toBe(true);
+          "document.documentElement.scrollWidth <= innerWidth",
+        ),
+      ).toBe(true);
+      if (Bun.env.BROWSER_EVIDENCE_DIR) {
         const image = await regular("Page.captureScreenshot", {
           format: "png",
         });
