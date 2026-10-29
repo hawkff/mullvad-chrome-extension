@@ -106,7 +106,7 @@ test("App browser workflows, responsive layout and keyboard focus", async () => 
       mobile: false,
     });
     await cdp("Page.navigate", { url: `${server.url}popup.html` });
-    await wait("document.body.textContent.includes('Browser proxy')");
+    await wait("document.body.textContent.includes('Proxy routing')");
     expect(
       await evaluate("document.body.textContent.includes('Proxy on')"),
     ).toBe(true);
@@ -118,7 +118,7 @@ test("App browser workflows, responsive layout and keyboard focus", async () => 
     );
     // Opening the popup runs the connection checks and reads the current website.
     await wait(
-      "document.querySelector('.checks')?.textContent.includes('Mullvad · 198.51.100.24')",
+      "document.querySelector('.checks')?.textContent.includes('198.51.100.24')",
     );
     await wait(
       "document.querySelector('.hostname')?.textContent === 'news.example.org'",
@@ -134,6 +134,13 @@ test("App browser workflows, responsive layout and keyboard focus", async () => 
       ),
     ).toBe(false);
     expect(await evaluate("!!document.querySelector('footer')")).toBe(false);
+    // Details live inline; there are no disclosures to reset or a separate refresh button.
+    expect(await evaluate("!!document.querySelector('details')")).toBe(false);
+    expect(
+      await evaluate(
+        "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Refresh status')",
+      ),
+    ).toBe(false);
     await evaluate("document.querySelector('input[type=checkbox]').click()");
     await wait("document.querySelector('input[type=checkbox]').checked");
     await click("Change global location");
@@ -185,13 +192,11 @@ test("App browser workflows, responsive layout and keyboard focus", async () => 
       ),
     ).toBe(false);
     expect(
-      await evaluate(
-        "document.body.textContent.includes('Effective private routing is not confirmed')",
-      ),
+      await evaluate("document.body.textContent.includes('Incognito routing')"),
     ).toBe(false);
     expect(
       await evaluate(
-        "document.body.textContent.includes('Nothing gets through')",
+        'document.body.textContent.includes("couldn\'t get through")',
       ),
     ).toBe(false);
     // A failed check explains what to do instead of leaving a silent red pill.
@@ -219,9 +224,28 @@ test("App browser workflows, responsive layout and keyboard focus", async () => 
       "!document.querySelector('.server-list').textContent.includes('No longer listed')",
     );
     await cdp("Page.navigate", { url: `${server.url}options.html` });
-    await wait(
-      "document.body.textContent.includes('This regular page does not inspect or monitor private routing')",
+    await wait("document.body.textContent.includes('Website rules')");
+    // Typed URLs fail inline, before any command reaches the worker.
+    await evaluate(
+      `(()=>{const input=document.querySelector('#website-domain');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'https://example.com/path');input.dispatchEvent(new Event('input',{bubbles:true}));})()`,
     );
+    await wait(
+      "document.querySelector('.field-error')?.textContent.startsWith('Enter a domain such as example.com')",
+    );
+    expect(
+      await evaluate(
+        "Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Choose site location').disabled",
+      ),
+    ).toBe(true);
+    await evaluate(
+      `(()=>{const input=document.querySelector('#website-domain');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'example.com');input.dispatchEvent(new Event('input',{bubbles:true}));})()`,
+    );
+    await wait("!document.querySelector('.field-error')");
+    expect(
+      await evaluate(
+        "Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Choose site location').disabled",
+      ),
+    ).toBe(false);
     expect(
       await evaluate("document.body.textContent.includes('Proxy on')"),
     ).toBe(true);
@@ -237,47 +261,52 @@ test("App browser workflows, responsive layout and keyboard focus", async () => 
     ).toBe(false);
     // Reloading needs no permission prompt: the popup click grants access to that tab.
     await evaluate(
-      "Array.from(document.querySelectorAll('label')).find(l=>l.textContent.includes('Reload the active website')).querySelector('input').click()",
+      "Array.from(document.querySelectorAll('label')).find(l=>l.textContent.includes('Reload the current website')).querySelector('input').click()",
     );
     await wait(
-      "Array.from(document.querySelectorAll('label')).find(l=>l.textContent.includes('Reload the active website')).querySelector('input').checked",
+      "Array.from(document.querySelectorAll('label')).find(l=>l.textContent.includes('Reload the current website')).querySelector('input').checked",
     );
     expect(await evaluate("!!document.querySelector('[role=alert]')")).toBe(
       false,
     );
+    // A declined privacy permission leaves the switch off and says why.
+    await click("Privacy");
+    await evaluate(
+      "Array.from(document.querySelectorAll('label')).find(l=>l.textContent.includes('Stop WebRTC')).querySelector('input').click()",
+    );
+    await wait(
+      "document.querySelector('[role=alert]')?.textContent.includes(\"didn't grant the privacy permission\")",
+    );
+    expect(
+      await evaluate(
+        "Array.from(document.querySelectorAll('label')).find(l=>l.textContent.includes('Stop WebRTC')).querySelector('input').checked",
+      ),
+    ).toBe(false);
     await cdp("Page.navigate", { url: `${server.url}options.html?incognito` });
     await wait("document.body.textContent.includes('Incognito window')");
     await wait("document.body.textContent.includes('Browser proxy')");
     expect(
       await evaluate(
-        "document.body.textContent.includes('Effective context: incognito')",
-      ),
-    ).toBe(true);
-    expect(
-      await evaluate(
-        "document.body.textContent.includes('Inherited regular routing')",
+        "document.body.textContent.includes('Incognito uses your regular routing')",
       ),
     ).toBe(true);
     await evaluate("document.querySelector('input[type=checkbox]').click()");
     await wait(
-      "document.body.textContent.includes('Private-session routing override')",
+      "document.body.textContent.includes('Incognito uses its own routing until you close the last Incognito window')",
     );
-    expect(
-      await evaluate(
-        "document.body.textContent.includes('last Incognito window closes')",
-      ),
-    ).toBe(true);
     await click("Import / export");
     await wait("!!document.querySelector('#import-json')");
     expect(
-      await evaluate("document.body.textContent.includes('upstream Firefox')"),
+      await evaluate(
+        'document.body.textContent.includes("Mullvad\'s Firefox extension")',
+      ),
     ).toBe(true);
     await evaluate(
       `(()=>{const input=document.querySelector('#import-json');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(input,'{}');input.dispatchEvent(new Event('input',{bubbles:true}));})()`,
     );
     await click("Validate import");
     await wait(
-      "document.querySelector('[role=alert]')?.textContent.includes('proxyDNS=false')",
+      "document.querySelector('[role=alert]')?.textContent.includes('Turn on proxy DNS')",
     );
     expect(
       await evaluate(
@@ -319,8 +348,18 @@ test("App browser workflows, responsive layout and keyboard focus", async () => 
     await cdp("Page.navigate", { url: `${server.url}popup.html?incognito` });
     // A spanning worker cannot run checks on the private route, so private popups never start them.
     await wait(
-      "document.body.textContent.includes('Checks run in regular windows only')",
+      "document.body.textContent.includes('Checks only run in regular windows')",
     );
+    expect(
+      await evaluate(
+        "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Open mullvad.net/check')",
+      ),
+    ).toBe(true);
+    expect(
+      await evaluate(
+        "Array.from(document.querySelectorAll('.pill')).map(pill => pill.firstChild.nextSibling.textContent).join()",
+      ),
+    ).toBe("Proxy");
     expect(
       await evaluate(
         "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Check again')",

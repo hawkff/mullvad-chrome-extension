@@ -1,3 +1,4 @@
+import { engine } from "../core/engine";
 import { relayName } from "../core/validation";
 import type { Command, CommandResult, Response } from "../shared/messages";
 import type {
@@ -7,6 +8,7 @@ import type {
   DnsObservation,
   LoadState,
   ProxyStatus,
+  RoutingSettings,
   Server,
 } from "../shared/state";
 import { plural, type Tone } from "../shared/status";
@@ -242,23 +244,73 @@ export function freshness(state: LoadState<unknown>): string {
 
 export type Observed = LoadState<ConnectionObservation | DnsObservation[]>;
 
-export function checkStatus(state: Observed): [Tone, string] {
-  if (state.status === "unknown") return ["off", "Not checked"];
-  if (state.status === "pending") return ["off", "Checking…"];
-  if (state.status !== "ready") return ["warn", "Unavailable"];
-  const rows = Array.isArray(state.value) ? state.value : [state.value];
-  if (!rows.length) return ["warn", "No resolvers observed"];
-  const mullvad = rows.every((row) => row.isMullvad);
-  const seen = Array.isArray(state.value)
-    ? plural(rows.length, "resolver")
-    : rows[0]?.ip;
+// Returns the tone, a short result and the address or resolver names behind it.
+export function checkStatus(state: Observed): [Tone, string, string] {
+  if (state.status === "unknown") return ["off", "Not checked", ""];
+  if (state.status === "pending") return ["off", "Checking…", ""];
+  if (state.status !== "ready") return ["warn", "Unavailable", ""];
+  const owner = (mullvad: boolean) => (mullvad ? "Mullvad" : "Not Mullvad");
+  if (!Array.isArray(state.value)) {
+    const { isMullvad, ip, city, country } = state.value;
+    const place = [city, country].filter(Boolean).join(", ");
+    return [
+      isMullvad ? "on" : "error",
+      place ? `${owner(isMullvad)} · ${place}` : owner(isMullvad),
+      ip,
+    ];
+  }
+  const rows = state.value;
+  if (!rows.length) return ["warn", "No resolvers found", ""];
+  const leaks = rows.filter((row) => !row.isMullvad);
+  if (!leaks.length)
+    return [
+      "on",
+      `Mullvad · ${plural(rows.length, "resolver")}`,
+      [
+        ...new Set(
+          rows.map((row) => row.hostname || row.organization || row.ip),
+        ),
+      ].join(", "),
+    ];
+  // Name only the failing resolvers, so a mixed result shows which ones leak.
   return [
-    mullvad ? "on" : "error",
-    `${mullvad ? "Mullvad" : "Not Mullvad"} · ${seen}`,
+    "error",
+    `Not Mullvad · ${leaks.length < rows.length ? `${leaks.length} of ` : ""}${plural(rows.length, "resolver")}`,
+    leaks
+      .map((row) =>
+        row.organization ? `${row.ip} (${row.organization})` : row.ip,
+      )
+      .join(", "),
   ];
 }
 
-export function exitStatus({ ipv4, ipv6 }: Diagnostics): [Tone, string] {
+// The checks describe only websites that take the same route as their requests.
+export function checksCoverSite(
+  host: string,
+  settings: RoutingSettings,
+  servers: Server[],
+) {
+  // Random mode gives each website its own location.
+  if (settings.randomMode) return false;
+  const context = { settings, servers, sessionSeed: "preview" };
+  const site = engine.route(host, context);
+  // Hosts that runDiagnostics requests; the DNS check uses a random first label.
+  return [
+    "ipv4.am.i.mullvad.net",
+    "ipv6.am.i.mullvad.net",
+    "probe.dnsleak.am.i.mullvad.net",
+  ].every((checkHost) => {
+    const check = engine.route(checkHost, context);
+    return site.kind === "proxy" && check.kind === "proxy"
+      ? site.serverId === check.serverId
+      : site.kind === check.kind;
+  });
+}
+
+export function exitStatus({
+  ipv4,
+  ipv6,
+}: Diagnostics): [Tone, string, string] {
   const ready = [ipv4, ipv6].filter((state) => state.status === "ready");
   // A non-Mullvad address on either family outranks any Mullvad result.
   return checkStatus(
@@ -267,18 +319,18 @@ export function exitStatus({ ipv4, ipv6 }: Diagnostics): [Tone, string] {
 }
 
 export function incognitoScopeDescription(proxy: ProxyStatus): string {
-  if (!proxy.applied) return "Effective private routing is not confirmed.";
+  if (!proxy.applied) return "Chrome hasn't confirmed the Incognito routing.";
   switch (proxy.settingScope) {
     case "regular":
-      return "Inherited regular routing. No private-session override is applied.";
+      return "Incognito uses your regular routing. Changes you make here last until you close the last Incognito window.";
     case "incognito_session_only":
-      return "Private-session routing override. It expires when the last Incognito window closes.";
+      return "Incognito uses its own routing until you close the last Incognito window.";
     case "regular_only":
-      return "The regular-only setting does not apply in Incognito.";
+      return "Your regular routing doesn't apply in Incognito.";
     case "incognito_persistent":
-      return "Chrome reports a persistent Incognito setting.";
+      return "Chrome reports an Incognito setting that stays after the windows close.";
     default:
-      return "Chrome has not confirmed whether private routing inherits regular settings or uses an override.";
+      return "Chrome hasn't confirmed which routing Incognito uses.";
   }
 }
 
@@ -295,19 +347,19 @@ export async function currentWebsiteTab(
   context: BrowserContext,
 ): Promise<{ id: number; url: string }> {
   const window = await chrome.windows.getCurrent({}).catch(() => {
-    throw new Error("Cannot read this browsing window.");
+    throw new Error("Couldn't read this window.");
   });
   if (
     typeof window.id !== "number" ||
     window.incognito !== (context === "incognito")
   )
-    throw new Error("No active website in this browsing context.");
+    throw new Error("This window has no current website.");
   const [selected] = await chrome.tabs.query({
     active: true,
     windowId: window.id,
   });
   if (selected?.id === undefined)
-    throw new Error("No active website in this window.");
+    throw new Error("This window has no current website.");
   const tab = await chrome.tabs.get(selected.id);
   if (
     tab.id !== selected.id ||
@@ -315,7 +367,7 @@ export async function currentWebsiteTab(
     tab.windowId !== window.id ||
     tab.incognito !== window.incognito
   )
-    throw new Error("The active website changed. Reload it manually.");
+    throw new Error("The current website changed. Reload it yourself.");
   // activeTab exposes the URL only for the tab where the toolbar button was clicked.
   if (!tab.url || !["http:", "https:"].includes(new URL(tab.url).protocol))
     throw new Error("Open an HTTP or HTTPS website first.");

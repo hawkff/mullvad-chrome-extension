@@ -119,7 +119,7 @@ Object.defineProperty(globalThis, "chrome", {
             error: {
               code: "invalid-input",
               message:
-                "Firefox proxyDNS=false is incompatible with Chrome. Enable proxyDNS before importing.",
+                "Chrome always sends DNS through the proxy. Turn on proxy DNS in Firefox and export again.",
             },
           };
         return { ok: true, value: structuredClone(state) };

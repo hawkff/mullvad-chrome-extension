@@ -493,7 +493,7 @@ test("toolbar shows whether routing is on and where it exits", async () => {
   });
   expect(toolbar).toEqual({
     icon: { 16: "/icons/icon-16.png", 32: "/icons/icon-32.png" },
-    title: "Mullvad Proxy is on. All websites via the VPN-internal proxy.",
+    title: "Mullvad Proxy is on. All websites via your VPN server.",
     badge: "ON",
   });
   owner = "controlled_by_other_extensions";
@@ -925,7 +925,9 @@ describe("real-core persisted routing", () => {
       const result = await controller.client({ type: "servers.refresh" });
       expect(result.ok).toBe(false);
       if (result.ok) throw new Error("Proxy write failure was hidden");
-      expect(result.error.message).not.toContain("refresh failed");
+      expect(result.error.message).not.toContain(
+        "Couldn't load the server list",
+      );
     } finally {
       fetcher.mockRestore();
     }

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Mullvad Proxy — Unofficial",
+  "name": "Mullvad Proxy",
   "version": "0.1.0",
-  "description": "Unofficial Mullvad VPN companion for Chrome. Requires an existing Mullvad VPN connection.",
+  "description": "Route all websites or only some through Mullvad SOCKS5 proxies, and check your connection. Requires Mullvad VPN.",
   "minimum_chrome_version": "102",
   "icons": {
     "16": "icons/icon-16.png",

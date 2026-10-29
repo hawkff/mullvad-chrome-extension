@@ -174,7 +174,7 @@ export class Controller {
       } catch {
         this.servers = {
           status: "error",
-          message: "Invalid cached server list; refresh required.",
+          message: "The saved server list is damaged. Refresh it.",
         };
       }
     }
@@ -197,7 +197,7 @@ export class Controller {
       } catch {
         throw new Failure(
           "internal",
-          "Invalid session routing pool; existing proxy was not changed. Restart the browser to recover.",
+          "The saved random locations are damaged. Restart Chrome to reset them.",
         );
       }
     } else this.session = { seed: crypto.randomUUID(), pool: this.catalog() };
@@ -208,7 +208,7 @@ export class Controller {
       this.startupError = true;
       throw new Failure(
         "internal",
-        "Saved settings failed validation; existing proxy and storage were left untouched.",
+        "Your saved settings couldn't be read. The proxy and settings weren't changed.",
       );
     }
     if (
@@ -272,11 +272,11 @@ export class Controller {
       status: "blocked",
     };
     if (!result.permissionGranted) {
-      result.message = "Proxy permission is not available.";
+      result.message = "Chrome hasn't granted the proxy permission.";
       return result;
     }
     if (context === "incognito" && !(await this.allowed())) {
-      result.message = "Enable Allow in Incognito in Chrome extension details.";
+      result.message = "Turn on Allow in Incognito in the extension's details.";
       return result;
     }
     try {
@@ -302,15 +302,14 @@ export class Controller {
           : "ready";
       if (result.status === "blocked")
         result.message =
-          "Chrome policy or another extension controls this effective proxy setting.";
+          "Another extension or a Chrome policy controls the proxy setting.";
       else if (this.active(expected) && !result.applied) {
         result.status = "error";
-        result.message =
-          "Saved routes are not confirmed as the effective mandatory proxy.";
+        result.message = "Chrome isn't using your saved routing.";
       }
     } catch {
       result.status = "error";
-      result.message = "Chrome could not report the effective proxy setting.";
+      result.message = "Chrome didn't report its proxy setting.";
     }
     return result;
   }
@@ -324,7 +323,8 @@ export class Controller {
       if (strict)
         throw new Failure(
           "blocked",
-          current.message ?? "Proxy control unavailable",
+          current.message ??
+            "Chrome won't let this extension control the proxy.",
         );
       return;
     }
@@ -336,10 +336,7 @@ export class Controller {
         scope: this.scope(context),
       });
       if (!isPac(await proxySetting(context), data))
-        throw new Failure(
-          "blocked",
-          "Chrome did not confirm the requested mandatory PAC.",
-        );
+        throw new Failure("blocked", "Chrome didn't accept the new routing.");
     } else if (context === "incognito") {
       if (isDirectOverride(await proxySetting(context))) return;
       await chrome.proxy.settings.set({
@@ -349,7 +346,7 @@ export class Controller {
       if (!isDirectOverride(await proxySetting(context)))
         throw new Failure(
           "blocked",
-          "Chrome did not confirm the private-session direct override.",
+          "Chrome didn't accept the Incognito routing.",
         );
     } else if (current.ownership === "controlled_by_this_extension") {
       // An inherited regular setting must not be cleared from the private scope.
@@ -436,7 +433,7 @@ export class Controller {
         ? (this.session.privateState ?? this.state)
         : this.state;
     if (context === "incognito" && !(await this.privateUsable()))
-      throw new Failure("blocked", "No opted-in private window is open.");
+      throw new Failure("blocked", "Open an Incognito window first.");
     try {
       if (context === "incognito") {
         this.session.privateSeed ??= crypto.randomUUID();
@@ -449,7 +446,10 @@ export class Controller {
         this.state = next;
       } else {
         if (epoch !== this.privateEpoch || !(await this.privateOpen()))
-          throw new Failure("blocked", "Private session closed during update.");
+          throw new Failure(
+            "blocked",
+            "Incognito closed before the change was saved.",
+          );
         const session = {
           ...this.session,
           privateState: { ...next, history: [] },
@@ -460,7 +460,7 @@ export class Controller {
           await this.endPrivate();
           throw new Failure(
             "blocked",
-            "Private session ended during storage update.",
+            "Incognito closed before the change was saved.",
           );
         }
       }
@@ -519,7 +519,7 @@ export class Controller {
     if (context === "incognito" && !(await this.privateUsable()))
       throw new Failure(
         "blocked",
-        "Incognito requires Chrome opt-in and an open private window.",
+        "Allow the extension in Incognito and open an Incognito window first.",
       );
     const state =
       context === "incognito"
@@ -536,7 +536,7 @@ export class Controller {
         id !== INTERNAL_DEFAULT_SERVER_ID &&
         !this.catalog().some((server) => server.id === id && server.online)
       )
-        throw new Failure("invalid-input", "Select a known online server.");
+        throw new Failure("invalid-input", "Choose a server that's online.");
     };
     // validateCommand has already canonicalized every host in the command.
     switch (command.type) {
@@ -565,7 +565,7 @@ export class Controller {
         )
           throw new Failure(
             "blocked",
-            "Auto-reload is shared with regular settings. Change it there before importing private settings.",
+            "This file changes the reload setting. Change it in regular settings first.",
           );
         if (command.type === "settings.import.preview") return preview.value;
         next.settings.routing = { ...routing, ...preview.value.routing };
@@ -593,7 +593,7 @@ export class Controller {
           )
             throw new Failure(
               "blocked",
-              "Auto-reload is shared. Change it from regular settings.",
+              "Change the reload setting in regular settings.",
             );
           next.settings.preferences.autoReload = autoReload;
         }
@@ -671,16 +671,13 @@ export class Controller {
       case "favorite.set": {
         // A first private save creates a session routing override; a star must not.
         if (context === "incognito")
-          throw new Failure(
-            "blocked",
-            "Favorites are shared with regular windows. Change them there.",
-          );
+          throw new Failure("blocked", "Change favorites in a regular window.");
         const id = command.serverId;
         if (
           command.favorite &&
           !this.catalog().some((server) => server.id === id)
         )
-          throw new Failure("invalid-input", "Select a known server.");
+          throw new Failure("invalid-input", "Choose a server from the list.");
         next.favorites = next.favorites.filter((entry) => entry !== id);
         if (command.favorite) next.favorites.push(id);
         break;
@@ -689,7 +686,7 @@ export class Controller {
         if (context === "incognito")
           throw new Failure(
             "blocked",
-            "Refresh the shared public server catalog from a regular extension window.",
+            "Refresh the server list from a regular window.",
           );
         const updatedAt = Date.now();
         let value: Server[];
@@ -705,7 +702,7 @@ export class Controller {
         } catch {
           throw new Failure(
             "offline",
-            "Server refresh failed or timed out; cached routing remains in place.",
+            "Couldn't load the server list. Your routing hasn't changed.",
           );
         }
         this.servers = { status: "ready", value, updatedAt };
@@ -722,12 +719,12 @@ export class Controller {
         if (context === "incognito")
           throw new Failure(
             "blocked",
-            "Privacy overrides are browser-wide. Change them from a regular extension page.",
+            "Change privacy settings from a regular window.",
           );
         if (!(await this.permission("privacy")))
           throw new Failure(
             "permission-denied",
-            "Grant privacy permission from the extension page first.",
+            "Allow the privacy permission first.",
           );
         const setting =
           command.control === "webRtcNonProxiedUdp"
@@ -746,7 +743,7 @@ export class Controller {
           )
             throw new Failure(
               "blocked",
-              "Another extension or policy controls this privacy setting.",
+              "Another extension or a Chrome policy controls this setting.",
             );
           if (command.control === "webRtcNonProxiedUdp")
             await chrome.privacy.network.webRTCIPHandlingPolicy.set({
@@ -787,7 +784,7 @@ export class Controller {
         message:
           error instanceof Failure
             ? error.message
-            : "Operation failed. Existing proxy settings were not deliberately disabled; inspect Chrome ownership and retry.",
+            : "Something went wrong. Try again.",
       },
     };
   }
@@ -799,7 +796,7 @@ export class Controller {
       if (context === "incognito")
         throw new Failure(
           "blocked",
-          "A spanning service worker cannot guarantee private-context diagnostic requests. Open the official Mullvad check in a private tab instead.",
+          "Checks only run in regular windows. Open mullvad.net/check in an Incognito tab instead.",
         );
       const diagnostics = await runDiagnostics(command.checks);
       return {

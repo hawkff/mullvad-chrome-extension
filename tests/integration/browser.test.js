@@ -328,7 +328,7 @@ test("real extension Incognito messages, session expiry and worker restart", asy
       checks: ["ipv4", "dns"],
     });
     expect(diagnostic).toMatchObject({ ok: false, error: { code: "blocked" } });
-    expect(diagnostic.error.message).toContain("private-context");
+    expect(diagnostic.error.message).toContain("regular windows");
     expect(
       await evaluate(
         first.page,
@@ -580,35 +580,50 @@ test("real extension Incognito messages, session expiry and worker restart", asy
         regular,
         `Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()===${JSON.stringify(text)}).click()`,
       );
-    // This page loaded before the controlled catalog was stored; refresh its snapshot.
-    await click("Refresh status");
+    // The options page reloads its state when its window regains focus.
+    const refreshPage = async (condition, description) => {
+      await evaluate(regular, "window.dispatchEvent(new Event('focus'))");
+      await waitFor(() => evaluate(regular, condition), description);
+    };
+    const rows = (host) =>
+      `Array.from(document.querySelectorAll('.rule')).filter(row=>row.textContent.startsWith(${JSON.stringify(host)})).length`;
+    // This page loaded before the controlled catalog and the imports were stored.
+    await refreshPage(
+      `${rows("www.example.co.uk")} === 1`,
+      "options snapshot with the controlled catalog",
+    );
+    await setDomain("https://example.co.uk/path");
     await waitFor(
       () =>
         evaluate(
           regular,
-          "document.body.innerText.includes('Status refreshed.')",
+          "document.querySelector('.field-error')?.textContent.startsWith('Enter a domain such as example.com')",
         ),
-      "options snapshot with the controlled catalog",
+      "inline invalid host error",
     );
-    await setDomain("https://example.co.uk/path");
+    expect(
+      await evaluate(
+        regular,
+        "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='Choose site location').disabled",
+      ),
+    ).toBe(true);
+    // The worker rejects the same input on its own.
+    expect(
+      await message(regular, {
+        type: "server.select",
+        serverId: "internal-default",
+        host: "https://example.co.uk/path",
+      }),
+    ).toMatchObject({ ok: false, error: { code: "invalid-input" } });
+    expect(await message(regular, { type: "settings.export" })).toEqual(stable);
+    await setDomain("example.co.uk");
     await click("Choose site location");
     await waitFor(
       () =>
         evaluate(regular, "Boolean(document.querySelector('#server-search'))"),
       "manual-domain location picker",
     );
-    await click("Use VPN-internal default");
-    await waitFor(
-      () =>
-        evaluate(
-          regular,
-          "document.querySelector('[role=alert]')?.textContent.includes('invalid-input')",
-        ),
-      "authoritative invalid host error",
-    );
-    expect(await message(regular, { type: "settings.export" })).toEqual(stable);
-    await setDomain("example.co.uk");
-    await click("Use VPN-internal default");
+    await click("Use your VPN server");
     await waitFor(
       () => evaluate(regular, "!document.querySelector('#server-search')"),
       "manual parent rule saved",
@@ -626,7 +641,7 @@ test("real extension Incognito messages, session expiry and worker restart", asy
         evaluate(regular, "Boolean(document.querySelector('#server-search'))"),
       "variant-domain picker",
     );
-    await click("Use VPN-internal default");
+    await click("Use your VPN server");
     await waitFor(
       () => evaluate(regular, "!document.querySelector('#server-search')"),
       "canonical rule created",
@@ -693,15 +708,7 @@ test("real extension Incognito messages, session expiry and worker restart", asy
           })
         ).ok,
       ).toBe(true);
-      await click("Refresh status");
-      await waitFor(
-        () =>
-          evaluate(
-            regular,
-            "document.body.innerText.includes('Status refreshed.')",
-          ),
-        "saved exclusion refreshed",
-      );
+      await refreshPage(`${rows(saved)} === 1`, "saved exclusion refreshed");
       await setDomain(variant);
       expect(
         await evaluate(
@@ -736,13 +743,8 @@ test("real extension Incognito messages, session expiry and worker restart", asy
       host: "example.com",
       excluded: true,
     });
-    await click("Refresh status");
-    await waitFor(
-      () =>
-        evaluate(
-          regular,
-          "document.body.innerText.includes('Status refreshed.')",
-        ),
+    await refreshPage(
+      `${rows("example.com")} === 2`,
       "entries refreshed before invalid input",
     );
     await setDomain("https://example.com/");
@@ -781,13 +783,13 @@ test("real extension Incognito messages, session expiry and worker restart", asy
     expect(
       await evaluate(
         regular,
-        "document.body.innerText.includes('Random mode overrides global and website selections and all exclusions')",
+        "document.body.innerText.includes('Overrides your other locations and exclusions.')",
       ),
     ).toBe(true);
     expect(
       await evaluate(
         regular,
-        "document.body.innerText.includes('Saved exclusions are inactive')",
+        'document.body.innerText.includes("Random mode is on, so exclusions don\'t apply.")',
       ),
     ).toBe(true);
     const toggleRandom = () =>
@@ -800,7 +802,7 @@ test("real extension Incognito messages, session expiry and worker restart", asy
       () =>
         evaluate(
           regular,
-          "document.body.innerText.includes('Direct while random mode is off')",
+          "Array.from(document.querySelectorAll('.rule small')).some(note=>note.textContent==='Connects directly')",
         ),
       "exclusion active without random mode",
     );
@@ -815,7 +817,7 @@ test("real extension Incognito messages, session expiry and worker restart", asy
       () =>
         evaluate(
           regular,
-          "document.body.innerText.includes('Saved exclusions are inactive')",
+          'document.body.innerText.includes("Random mode is on, so exclusions don\'t apply.")',
         ),
       "random override restored",
     );
@@ -1250,7 +1252,7 @@ test("actual optional permission grants and revocation", async () => {
     ).toBe(false);
     await evaluate(
       page,
-      "Array.from(document.querySelectorAll('label')).find(l=>l.textContent.includes('Reload the active website')).querySelector('input').click()",
+      "Array.from(document.querySelectorAll('label')).find(l=>l.textContent.includes('Reload the current website')).querySelector('input').click()",
     );
     await waitFor(
       async () =>
@@ -1328,13 +1330,13 @@ test("actual optional permission grants and revocation", async () => {
       `chrome.tabs.update(${liveTab.id},{url:${JSON.stringify(reloadUrl)}})`,
     );
     await waitFor(() => reloadHits === 3, "new current website load");
-    await evaluate(
-      page,
-      "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='Refresh status').click()",
-    );
+    await evaluate(page, "window.dispatchEvent(new Event('focus'))");
     await waitFor(
       () =>
-        evaluate(page, "document.body.innerText.includes('Status refreshed.')"),
+        evaluate(
+          page,
+          "!document.querySelector('input[type=checkbox]').checked",
+        ),
       "options refreshed",
     );
     await evaluate(
@@ -1395,15 +1397,12 @@ test("actual optional permission grants and revocation", async () => {
         })
       ).ok,
     ).toBe(true);
-    await evaluate(
-      privatePopup,
-      "Array.from(document.querySelectorAll('button')).find(b=>b.textContent.trim()==='Refresh status').click()",
-    );
+    await evaluate(privatePopup, "window.dispatchEvent(new Event('focus'))");
     await waitFor(
       () =>
         evaluate(
           privatePopup,
-          "document.body.innerText.includes('Status refreshed.')",
+          "!document.querySelector('input[type=checkbox]').checked",
         ),
       "private override reflected in UI",
     );

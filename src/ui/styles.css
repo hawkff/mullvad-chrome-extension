@@ -47,8 +47,7 @@ textarea {
 }
 button,
 input,
-textarea,
-summary {
+textarea {
   outline-offset: 3px;
 }
 :focus-visible {
@@ -423,23 +422,23 @@ main {
   color: var(--yellow);
   font-size: 12.5px;
 }
-.status + .notice {
-  margin-top: 10px;
+.notice[data-tone="error"] {
+  background: #4f2f3a;
+  color: var(--red-text);
+}
+main > .notice,
+main > .lead {
+  margin: 0 0 10px;
+}
+main > .lead {
+  padding: 0 4px;
+}
+.field-error {
+  color: var(--red-text);
+  font-size: 12.5px;
 }
 .empty {
   color: var(--soft);
-}
-details {
-  margin-top: 10px;
-}
-summary {
-  width: fit-content;
-  color: var(--muted);
-  font-size: 12.5px;
-  cursor: pointer;
-}
-summary:hover {
-  color: var(--text);
 }
 
 .meta-row {
@@ -557,25 +556,26 @@ summary:hover {
 }
 .checks li {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
-  padding: 7px 0;
+  padding: 8px 0;
   border-top: 1px solid var(--line);
 }
 .checks li:first-child {
   border-top: 0;
 }
+.checks .mark {
+  margin-top: 1px;
+}
 .check-name {
+  flex: none;
   width: 36px;
   color: var(--soft);
   font-weight: 600;
 }
-.observation h3 {
-  margin-bottom: 0;
-}
-.observation ul {
-  margin: 4px 0;
-  padding-left: 18px;
+.check-value {
+  min-width: 0;
+  color: var(--text);
   overflow-wrap: anywhere;
 }
 

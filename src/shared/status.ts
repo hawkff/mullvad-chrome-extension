@@ -30,13 +30,13 @@ export function proxyStatus(
       return status(
         "on",
         "Proxy on",
-        `Rules for ${plural(rules, "website")}; other websites connect directly.`,
+        `Rules for ${plural(rules, "website")}. Other websites connect directly.`,
       );
     const server = servers.find((row) => row.id === routing.globalServerId);
     const via = server
       ? `${server.city}, ${server.country}`
       : routing.globalServerId === INTERNAL_DEFAULT_SERVER_ID
-        ? "the VPN-internal proxy"
+        ? "your VPN server"
         : "an unavailable server";
     // Rules and exclusions override the global route for their hosts.
     const exceptions = [

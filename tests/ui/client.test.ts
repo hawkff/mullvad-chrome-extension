@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { proxyStatus } from "../../src/shared/status";
 import {
+  checkStatus,
+  checksCoverSite,
   currentWebsiteTab,
   exitStatus,
   freshness,
@@ -141,41 +143,119 @@ test("status summary names route exceptions and any non-Mullvad address", () => 
     updatedAt: 1,
     value: { ip: "198.51.100.1", isMullvad: true },
   };
-  expect(exitStatus(checks)).toEqual(["on", "Mullvad · 198.51.100.1"]);
+  expect(exitStatus(checks)).toEqual(["on", "Mullvad", "198.51.100.1"]);
   checks.ipv6 = {
     status: "ready",
     updatedAt: 1,
     value: { ip: "2001:db8::1", isMullvad: false },
   };
-  expect(exitStatus(checks)).toEqual(["error", "Not Mullvad · 2001:db8::1"]);
+  expect(exitStatus(checks)).toEqual(["error", "Not Mullvad", "2001:db8::1"]);
   checks.ipv4 = { status: "error", message: "Timed out" };
   checks.ipv6 = {
     status: "ready",
     updatedAt: 1,
-    value: { ip: "2001:db8::1", isMullvad: true },
+    value: {
+      ip: "2001:db8::1",
+      isMullvad: true,
+      city: "Gothenburg",
+      country: "Sweden",
+    },
   };
-  expect(exitStatus(checks)).toEqual(["on", "Mullvad · 2001:db8::1"]);
+  expect(exitStatus(checks)).toEqual([
+    "on",
+    "Mullvad · Gothenburg, Sweden",
+    "2001:db8::1",
+  ]);
+  expect(
+    checkStatus({
+      status: "ready",
+      updatedAt: 1,
+      value: [
+        { ip: "198.51.100.53", isMullvad: true, hostname: "se-got-dns-001" },
+      ],
+    }),
+  ).toEqual(["on", "Mullvad · 1 resolver", "se-got-dns-001"]);
+  expect(
+    checkStatus({
+      status: "ready",
+      updatedAt: 1,
+      value: [
+        { ip: "198.51.100.53", isMullvad: true, hostname: "se-got-dns-001" },
+        {
+          ip: "203.0.113.9",
+          isMullvad: false,
+          hostname: "",
+          organization: "Example ISP",
+        },
+      ],
+    }),
+  ).toEqual([
+    "error",
+    "Not Mullvad · 1 of 2 resolvers",
+    "203.0.113.9 (Example ISP)",
+  ]);
+});
+
+test("connection checks describe only websites on their route", () => {
+  const servers =
+    fixture.servers.status === "ready" ? fixture.servers.value : [];
+  const routing = {
+    enabled: true,
+    globalServerId: "se-got-001",
+    randomMode: false,
+    rules: [{ host: "example.com", enabled: true, serverId: "de-ber-001" }],
+    exclusions: ["intranet.example"],
+  };
+  expect(checksCoverSite("news.example.org", routing, servers)).toBe(true);
+  expect(checksCoverSite("www.example.com", routing, servers)).toBe(false);
+  expect(checksCoverSite("intranet.example", routing, servers)).toBe(false);
+  expect(
+    checksCoverSite(
+      "news.example.org",
+      { ...routing, randomMode: true },
+      servers,
+    ),
+  ).toBe(false);
+  // With the global route off, the checks and unruled websites both connect directly.
+  expect(
+    checksCoverSite(
+      "news.example.org",
+      { ...routing, enabled: false },
+      servers,
+    ),
+  ).toBe(true);
+  // A rule for one check host splits that check from the global route.
+  expect(
+    checksCoverSite(
+      "news.example.org",
+      {
+        ...routing,
+        exclusions: [...routing.exclusions, "ipv6.am.i.mullvad.net"],
+      },
+      servers,
+    ),
+  ).toBe(false);
 });
 
 test("Incognito scope labels distinguish inheritance, overrides and unknown state", () => {
   const proxy = { ...fixture.incognitoProxy, applied: true };
   expect(
     incognitoScopeDescription({ ...proxy, settingScope: "regular" }),
-  ).toContain("Inherited regular routing");
+  ).toContain("Incognito uses your regular routing");
   expect(
     incognitoScopeDescription({
       ...proxy,
       settingScope: "incognito_session_only",
     }),
-  ).toContain("last Incognito window closes");
-  expect(incognitoScopeDescription(proxy)).toContain("has not confirmed");
+  ).toContain("its own routing until you close the last Incognito window");
+  expect(incognitoScopeDescription(proxy)).toContain("hasn't confirmed which");
   expect(
     incognitoScopeDescription({
       ...proxy,
       applied: false,
       settingScope: "regular",
     }),
-  ).not.toContain("Inherited");
+  ).not.toContain("regular routing");
 });
 
 test("window context resolves before UI mount and never defaults on failure", async () => {
@@ -269,7 +349,9 @@ test("active website lookup uses its hosting window and rejects stale/unsafe tar
     };
     window = { id: 7, incognito: true };
     expect((await currentWebsiteTab("incognito")).id).toBe(4);
-    await expect(currentWebsiteTab("regular")).rejects.toThrow("context");
+    await expect(currentWebsiteTab("regular")).rejects.toThrow(
+      "no current website",
+    );
     // Without an activeTab grant Chrome omits the URL.
     tab = { ...tab, url: undefined };
     await expect(currentWebsiteTab("incognito")).rejects.toThrow(

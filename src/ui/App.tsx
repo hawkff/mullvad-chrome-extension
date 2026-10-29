@@ -10,15 +10,15 @@ import {
   type Server,
   type Snapshot,
 } from "../shared/state";
-import { proxyStatus, type Tone } from "../shared/status";
+import { plural, proxyStatus, type Tone } from "../shared/status";
 import {
   checkStatus,
+  checksCoverSite,
   client,
   currentWebsiteTab,
   exitStatus,
   freshness,
   incognitoScopeDescription,
-  type Observed,
   STALE_AFTER,
   searchServers,
 } from "./client";
@@ -67,6 +67,12 @@ async function loadChecks(context: BrowserContext): Promise<Diagnostics> {
     return { scope: "browser-route", ipv4: failed, ipv6: failed, dns: failed };
   }
 }
+// Extension pages may open chrome:// pages; websites cannot.
+const openTab = async (url: string) =>
+  chrome.tabs.create({
+    url,
+    windowId: (await chrome.windows.getCurrent({})).id,
+  });
 
 function RelayRow({
   server,
@@ -146,49 +152,6 @@ function RelayRow({
   );
 }
 
-function Observation({ title, state }: { title: string; state: Observed }) {
-  const values =
-    state.status === "ready"
-      ? Array.isArray(state.value)
-        ? state.value
-        : [state.value]
-      : [];
-  return (
-    <div className="observation">
-      <h3>{title}</h3>
-      <p className="meta">{freshness(state)}</p>
-      {state.status === "ready" ? (
-        values.length ? (
-          <ul>
-            {values.map((value) => (
-              <li
-                key={`${value.ip}-${"hostname" in value ? value.hostname : "connection"}`}
-              >
-                <strong>
-                  {value.isMullvad
-                    ? "Mullvad observed"
-                    : "Non-Mullvad observed"}
-                </strong>
-                <br />
-                <span className="data">{value.ip}</span>
-                {value.country ? ` · ${value.country}` : ""}
-                {"hostname" in value && value.hostname ? (
-                  <>
-                    <br />
-                    {value.hostname}
-                  </>
-                ) : null}
-              </li>
-            ))}
-          </ul>
-        ) : (
-          <p>No resolvers observed. This does not confirm DNS protection.</p>
-        )
-      ) : null}
-    </div>
-  );
-}
-
 export function App({ context }: { context: BrowserContext }) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [busy, setBusy] = useState(false);
@@ -225,6 +188,21 @@ export function App({ context }: { context: BrowserContext }) {
       if (run === checkRun.current) setChecks(result);
     });
   }, [context]);
+  // Loads state without disabling controls or announcing it.
+  const load = useCallback(
+    () =>
+      client({ type: "snapshot", context }).then(
+        (response) =>
+          response.ok
+            ? setSnapshot(response.value)
+            : setError(response.error.message),
+        (e: unknown) =>
+          setError(
+            e instanceof Error ? e.message : "Can't reach the extension.",
+          ),
+      ),
+    [context],
+  );
 
   async function request<C extends Command>(
     command: C,
@@ -234,13 +212,10 @@ export function App({ context }: { context: BrowserContext }) {
     setNotice("");
     try {
       const response = await client({ ...command, context });
-      if (!response.ok)
-        throw new Error(`${response.error.code}: ${response.error.message}`);
+      if (!response.ok) throw new Error(response.error.message);
       return response.value;
     } catch (e) {
-      setError(
-        e instanceof Error ? e.message : "The request failed. Try again.",
-      );
+      setError(e instanceof Error ? e.message : "That didn't work. Try again.");
     } finally {
       setBusy(false);
     }
@@ -275,7 +250,7 @@ export function App({ context }: { context: BrowserContext }) {
             await chrome.tabs.reload(tab.id);
           } catch (error) {
             setError(
-              `Settings saved, but the active website was not reloaded. ${error instanceof Error ? error.message : "Reload it manually."}`,
+              `Saved, but the website wasn't reloaded. ${error instanceof Error ? error.message : "Reload it yourself."}`,
             );
           }
         }
@@ -284,27 +259,19 @@ export function App({ context }: { context: BrowserContext }) {
     return value;
   }
   useEffect(() => {
-    let active = true;
-    setBusy(true);
-    client({ type: "snapshot", context })
-      .then((response) => {
-        if (!active) return;
-        if (response.ok) setSnapshot(response.value);
-        else setError(`${response.error.code}: ${response.error.message}`);
-      })
-      .catch((e: unknown) => {
-        if (active)
-          setError(
-            e instanceof Error ? e.message : "Cannot reach the extension.",
-          );
-      })
-      .finally(() => {
-        if (active) setBusy(false);
-      });
-    return () => {
-      active = false;
+    void load();
+    // Settings can change in another tab or window; reload when this page comes back.
+    const refocus = () => void load();
+    const reshow = () => {
+      if (document.visibilityState === "visible") void load();
     };
-  }, [context]);
+    window.addEventListener("focus", refocus);
+    document.addEventListener("visibilitychange", reshow);
+    return () => {
+      window.removeEventListener("focus", refocus);
+      document.removeEventListener("visibilitychange", reshow);
+    };
+  }, [load]);
   useEffect(() => {
     if (isOptions) return;
     // Like upstream, the popup checks the connection as soon as it opens.
@@ -348,7 +315,9 @@ export function App({ context }: { context: BrowserContext }) {
     setError("");
     try {
       if (!(await chrome.permissions.request({ permissions: ["privacy"] })))
-        throw new Error("Chrome denied privacy access. No setting changed.");
+        throw new Error(
+          "Chrome didn't grant the privacy permission. Nothing changed.",
+        );
       await mutate(
         enabled === undefined
           ? { type: "privacy.restore", control }
@@ -356,15 +325,13 @@ export function App({ context }: { context: BrowserContext }) {
       );
     } catch (e) {
       setError(
-        e instanceof Error
-          ? e.message
-          : "Cannot change Chrome privacy settings.",
+        e instanceof Error ? e.message : "Couldn't change the privacy setting.",
       );
     }
   }
   async function select(serverId: string) {
     if (target === "site" && !host) {
-      setError("Choose an active website first.");
+      setError("Open a website first.");
       return;
     }
     if (
@@ -401,7 +368,7 @@ export function App({ context }: { context: BrowserContext }) {
       if (value) setPreview(value);
     } catch {
       setError(
-        "Invalid JSON. Choose an unmodified Firefox export or a backup from this extension.",
+        "This isn't valid JSON. Choose a backup from this extension or a Firefox export.",
       );
     }
   }
@@ -411,14 +378,15 @@ export function App({ context }: { context: BrowserContext }) {
   const servers =
     snapshot?.servers.status === "ready" ? snapshot.servers.value : [];
   const serverLabel = (id: string) => {
-    if (id === INTERNAL_DEFAULT_SERVER_ID)
-      return "VPN-internal SOCKS5 · 10.64.0.1:1080";
+    if (id === INTERNAL_DEFAULT_SERVER_ID) return "Your VPN server";
     const server = servers.find((row) => row.id === id);
     return server
       ? `${server.city}, ${server.country} · ${relayName(server.hostname)}${server.online ? "" : " · Offline"}`
       : `Unavailable server: ${id}`;
   };
   const canonical = checked(() => validateHost(host));
+  // The worker validates hosts the same way, so typed input fails here first.
+  const fieldError = host && !canonical.ok ? canonical.error : "";
   const siteRule = canonical.ok
     ? routing?.rules.find((r) => r.host === canonical.value)
     : undefined;
@@ -448,7 +416,7 @@ export function App({ context }: { context: BrowserContext }) {
     : !checkFailed
       ? ""
       : routing?.enabled || routing?.randomMode
-        ? "The check couldn't get through the proxy. If websites don't load, make sure Mullvad VPN is connected or turn the proxy off."
+        ? "The check couldn't get through the proxy. If websites don't load, connect Mullvad VPN or turn the proxy off."
         : "The connection check failed. Make sure you're online and Mullvad VPN is connected.";
   const siteRoute = (() => {
     if (!routing || !canonical.ok) return "";
@@ -462,16 +430,19 @@ export function App({ context }: { context: BrowserContext }) {
     if (route.kind === "direct" && route.reason === "local")
       return "Local address. It always connects directly.";
     if (routing.randomMode)
-      return "Gets a random location for this browser session.";
+      return "Gets a random location until Chrome restarts.";
     if (route.kind === "blocked")
       return snapshot?.servers.status === "ready"
         ? "Blocked until you choose an available location."
         : "Load the server list to see where this website goes.";
     if (route.kind === "direct")
       return route.reason === "excluded"
-        ? "Excluded. It connects directly, without the proxy."
+        ? "Excluded. It connects directly."
         : "Connects directly. Choose a location to proxy only this website.";
-    const where = serverLabel(route.serverId);
+    const server = servers.find((row) => row.id === route.serverId);
+    const where = server
+      ? `${server.city}, ${server.country}`
+      : "your VPN server";
     return route.source === "exact"
       ? `Uses its own location: ${where}.`
       : route.source === "parent"
@@ -609,17 +580,48 @@ export function App({ context }: { context: BrowserContext }) {
           })}
         </ul>
         {matches.length === 0 ? (
-          <p>No matching servers. Refresh the list or change your search.</p>
+          <p>No servers match. Change your search or refresh the list.</p>
         ) : null}
         <button
           type="button"
           disabled={busy}
           onClick={() => select(INTERNAL_DEFAULT_SERVER_ID)}
         >
-          Use VPN-internal default
+          Use your VPN server
         </button>
       </section>
     ) : null;
+
+  // The popup fills these from the current tab; the options page from typed input.
+  const siteActions = host ? (
+    <div className="actions">
+      <button
+        type="button"
+        disabled={!canonical.ok}
+        onClick={() => openPicker("site")}
+      >
+        Choose site location
+      </button>
+      <button
+        type="button"
+        disabled={!canonical.ok}
+        onClick={() =>
+          mutate({ type: "exclusion.set", host, excluded: !excluded }, true)
+        }
+      >
+        {excluded ? "Remove exclusion" : "Add exclusion"}
+      </button>
+      {siteRule ? (
+        <button
+          type="button"
+          className="danger"
+          onClick={() => mutate({ type: "rule.remove", host }, true)}
+        >
+          Reset site rule
+        </button>
+      ) : null}
+    </div>
+  ) : null;
 
   const settingsButton = isOptions ? null : (
     <button
@@ -627,7 +629,7 @@ export function App({ context }: { context: BrowserContext }) {
       className="ghost"
       title={
         context === "incognito"
-          ? "Opens regular, persistent settings"
+          ? "Opens the settings for regular windows"
           : undefined
       }
       onClick={() => chrome.runtime.openOptionsPage()}
@@ -635,6 +637,26 @@ export function App({ context }: { context: BrowserContext }) {
       {context === "incognito" ? "Regular settings" : "Settings"}
     </button>
   );
+  const privacyControls = snapshot
+    ? ([
+        {
+          control: "webRtcNonProxiedUdp",
+          label: "Stop WebRTC from bypassing the proxy",
+          hint: "WebRTC can then only connect through the proxy. Some calls may stop working.",
+          state: snapshot.privacy.webRtc,
+          on: snapshot.privacy.webRtc.value === "disable_non_proxied_udp",
+          enable: true,
+        },
+        {
+          control: "networkPrediction",
+          label: "Turn off network prediction",
+          hint: "Stops Chrome from connecting to links before you click them.",
+          state: snapshot.privacy.networkPrediction,
+          on: snapshot.privacy.networkPrediction.value === false,
+          enable: false,
+        },
+      ] as const)
+    : [];
 
   return (
     <div className={isOptions ? "app options" : "app popup"}>
@@ -647,25 +669,29 @@ export function App({ context }: { context: BrowserContext }) {
           <h1>Mullvad Proxy</h1>
         </div>
         {context === "regular" ? settingsButton : null}
-        {!isOptions && snapshot && status ? (
+        {!isOptions && status ? (
           <ul className="pills" aria-label="Status summary">
             {(
               [
-                ["Proxy", status.tone, status.title],
+                ["Proxy", status.tone, `${status.title}. ${status.detail}`],
                 ["VPN", ...exitStatus(checks)],
                 ["DNS", ...checkStatus(checks.dns)],
               ] as const
-            ).map(([name, tone, text]) => {
-              // Connection checks observe browser requests, not the VPN tunnel itself.
-              const label = name === "Proxy" ? text : `Browser check: ${text}`;
-              return (
-                <li key={name} className="pill" title={label}>
-                  <Mark tone={tone} />
-                  {name}
-                  <span className="sr-only">: {label}</span>
-                </li>
-              );
-            })}
+            )
+              // Checks never run in Incognito, so those pills would always read "not checked".
+              .filter(([name]) => context === "regular" || name === "Proxy")
+              .map(([name, tone, text]) => {
+                // Connection checks observe browser requests, not the VPN tunnel itself.
+                const label =
+                  name === "Proxy" ? text : `Browser check: ${text}`;
+                return (
+                  <li key={name} className="pill" title={label}>
+                    <Mark tone={tone} />
+                    {name}
+                    <span className="sr-only">: {label}</span>
+                  </li>
+                );
+              })}
           </ul>
         ) : null}
       </header>
@@ -685,69 +711,58 @@ export function App({ context }: { context: BrowserContext }) {
           {busy ? "Working…" : notice}
         </p>
         {!snapshot || !routing || !effective || !status ? (
-          <section className="card" aria-busy={busy}>
+          <section className="card" aria-busy={!error}>
             <h2>Connecting to the extension</h2>
-            <p>No connection or proxy status is available yet.</p>
             <button
               type="button"
               disabled={busy}
-              onClick={() => mutate({ type: "snapshot" })}
+              onClick={() => {
+                // Focus reloads keep earlier errors; an explicit retry starts clean.
+                setError("");
+                void load();
+              }}
             >
-              Retry connection
+              Retry
             </button>
           </section>
         ) : !isOptions && picker ? (
           locationPicker
         ) : (
           <>
-            <section className="card" aria-labelledby="status-title">
-              <div className="card-head">
-                <h2 id="status-title">Browser proxy</h2>
-                <button
-                  type="button"
-                  className="ghost"
-                  disabled={busy}
-                  onClick={() => mutate({ type: "snapshot" })}
-                >
-                  Refresh status
-                </button>
-              </div>
-              <p className="status" data-tone={status.tone}>
-                <Mark tone={status.tone} />
-                <span>
-                  <strong>{status.title}</strong> {status.detail}
-                </span>
-              </p>
-              {routeWarning ? <p className="notice">{routeWarning}</p> : null}
-              {context === "incognito" ? (
-                <p className="hint">
-                  {incognitoScopeDescription(snapshot.incognitoProxy)} Routing
-                  changes made here apply to this private session and expire
-                  when the last Incognito window closes.
+            {isOptions ? (
+              <section className="card">
+                <h2>Browser proxy</h2>
+                <p className="status" data-tone={status.tone}>
+                  <Mark tone={status.tone} />
+                  <span>
+                    <strong>{status.title}</strong> {status.detail}
+                  </span>
                 </p>
-              ) : null}
-              <details open={isOptions || undefined}>
-                <summary>Scope, ownership & requirements</summary>
-                {!snapshot.incognitoAllowed ? (
+                {context === "incognito" ? (
                   <p className="hint">
-                    Incognito access is off. Enable “Allow in Incognito” in
-                    Chrome extension details, then open this popup in a private
-                    window to check its effective status.
+                    {incognitoScopeDescription(snapshot.incognitoProxy)}
                   </p>
                 ) : null}
-                <p className="hint">
-                  Ownership: {effective.ownership.replaceAll("_", " ")}
-                  <br />
-                  Effective context: {effective.scope} · setting:{" "}
-                  {effective.settingScope}
-                </p>
-                <p className="hint">
-                  This extension does not connect the VPN. Mullvad SOCKS5
-                  servers require a working Mullvad VPN connection. Direct
-                  destinations remain direct.
-                </p>
-              </details>
-            </section>
+              </section>
+            ) : (
+              <>
+                {status.tone === "warn" || status.tone === "error" ? (
+                  <p className="notice" data-tone={status.tone}>
+                    <strong>{status.title}.</strong> {status.detail}
+                  </p>
+                ) : null}
+                {routeWarning ? (
+                  <p className="notice" data-tone="warn">
+                    {routeWarning}
+                  </p>
+                ) : null}
+                {context === "incognito" ? (
+                  <p className="hint lead">
+                    {incognitoScopeDescription(snapshot.incognitoProxy)}
+                  </p>
+                ) : null}
+              </>
+            )}
             {isOptions ? (
               <nav className="tabs" aria-label="Settings sections">
                 {["routing", "privacy", "history", "backup"].map((name) => (
@@ -789,11 +804,10 @@ export function App({ context }: { context: BrowserContext }) {
                       <p className="meta">
                         {routing.globalServerId
                           ? serverLabel(routing.globalServerId)
-                          : "No global server selected"}
+                          : "No location chosen"}
                       </p>
                       <button
                         type="button"
-                        className="primary"
                         onClick={() =>
                           picker && target === "global"
                             ? setPicker(false)
@@ -803,6 +817,24 @@ export function App({ context }: { context: BrowserContext }) {
                         Change global location
                       </button>
                     </div>
+                    {!isOptions ? (
+                      <div className="row">
+                        <h3>Current website</h3>
+                        {host ? (
+                          <>
+                            <p className="hostname">{host}</p>
+                            {siteRoute ? (
+                              <p className="meta">{siteRoute}</p>
+                            ) : null}
+                            {siteActions}
+                          </>
+                        ) : (
+                          <p className="hint">
+                            Open a website to choose a location for it.
+                          </p>
+                        )}
+                      </div>
+                    ) : null}
                     <div className="row">
                       <label className="switch">
                         <span>Random mode</span>
@@ -813,110 +845,46 @@ export function App({ context }: { context: BrowserContext }) {
                         />
                       </label>
                       <p className="hint">
-                        Session-stable selection per destination. Random mode
-                        overrides global and website selections and all
-                        exclusions. Local address bypasses still apply.
+                        Gives each website a random location until Chrome
+                        restarts. Overrides your other locations and exclusions.
                       </p>
-                    </div>
-                    <div className="row">
-                      <h3>
-                        {isOptions ? "Website domain" : "Current website"}
-                      </h3>
-                      {isOptions ? (
-                        <>
-                          <label htmlFor="website-domain">
-                            Domain or subdomain
-                          </label>
-                          <input
-                            id="website-domain"
-                            type="text"
-                            placeholder="example.com"
-                            autoCapitalize="none"
-                            spellCheck={false}
-                            value={host}
-                            onChange={(event) => setHost(event.target.value)}
-                          />
-                          <p className="hint">
-                            Enter a domain without a URL or port. A registrable
-                            parent domain also covers its subdomains.
-                          </p>
-                        </>
-                      ) : null}
-                      {host ? (
-                        <>
-                          {!isOptions ? (
-                            <p className="hostname">{host}</p>
-                          ) : null}
-                          {siteRoute ? (
-                            <p className="meta">{siteRoute}</p>
-                          ) : null}
-                          <div className="actions">
-                            <button
-                              type="button"
-                              className="primary"
-                              onClick={() => openPicker("site")}
-                            >
-                              Choose site location
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                mutate(
-                                  {
-                                    type: "exclusion.set",
-                                    host,
-                                    excluded: !excluded,
-                                  },
-                                  true,
-                                )
-                              }
-                            >
-                              {excluded ? "Remove exclusion" : "Add exclusion"}
-                            </button>
-                            {siteRule ? (
-                              <button
-                                type="button"
-                                className="danger"
-                                onClick={() =>
-                                  mutate({ type: "rule.remove", host }, true)
-                                }
-                              >
-                                Reset site rule
-                              </button>
-                            ) : null}
-                          </div>
-                        </>
-                      ) : (
-                        <p className="hint">
-                          {isOptions
-                            ? "Enter a domain above to choose its location or add an exclusion without visiting it."
-                            : "Open a website to choose a location for it or exclude it."}
-                        </p>
-                      )}
                     </div>
                   </fieldset>
                 </section>
                 {isOptions ? locationPicker : null}
                 {isOptions ? (
                   <section className="card">
-                    <h2>Website rules & exclusions</h2>
-                    <p className="hint">
-                      Rules match destination hosts, not the page that initiates
-                      a request.
-                    </p>
-                    {routing.randomMode ? (
-                      <p role="status" className="notice">
-                        Random mode is on. Saved exclusions are inactive; these
-                        destinations use random routing.
-                      </p>
-                    ) : null}
+                    <h2>Website rules</h2>
                     <fieldset disabled={busy}>
+                      <label htmlFor="website-domain">Add a website</label>
+                      <input
+                        id="website-domain"
+                        type="text"
+                        placeholder="example.com"
+                        autoCapitalize="none"
+                        spellCheck={false}
+                        aria-invalid={Boolean(fieldError) || undefined}
+                        aria-describedby="website-domain-help"
+                        value={host}
+                        onChange={(event) => setHost(event.target.value)}
+                      />
+                      <p
+                        id="website-domain-help"
+                        className={fieldError ? "field-error" : "hint"}
+                      >
+                        {fieldError ||
+                          "A rule for example.com also covers www.example.com."}
+                      </p>
+                      {siteRoute ? <p className="meta">{siteRoute}</p> : null}
+                      {siteActions}
+                      {routing.randomMode ? (
+                        <p role="status" className="notice" data-tone="warn">
+                          Random mode is on, so exclusions don't apply.
+                        </p>
+                      ) : null}
                       {routing.rules.length === 0 &&
                       routing.exclusions.length === 0 ? (
-                        <p className="empty">
-                          No website rules. Enter a domain above to add a rule
-                          or exclusion.
-                        </p>
+                        <p className="empty">No website rules yet.</p>
                       ) : null}
                       {routing.rules.map((rule) => (
                         <div className="rule" key={rule.host}>
@@ -963,7 +931,7 @@ export function App({ context }: { context: BrowserContext }) {
                             <small>
                               {routing.randomMode
                                 ? "Inactive while random mode is on"
-                                : "Direct while random mode is off"}
+                                : "Connects directly"}
                             </small>
                           </span>
                           <button
@@ -989,134 +957,167 @@ export function App({ context }: { context: BrowserContext }) {
               </>
             ) : null}
             {!isOptions ? (
-              <section className="card">
+              <section className="card" aria-labelledby="check-title">
                 <div className="card-head">
-                  <h2>VPN & DNS check</h2>
+                  <h2 id="check-title">Connection check</h2>
                   {context === "regular" ? (
                     <button
                       type="button"
                       className="ghost"
                       disabled={checking}
-                      onClick={runChecks}
+                      onClick={() => {
+                        runChecks();
+                        void load();
+                      }}
                     >
                       Check again
                     </button>
                   ) : null}
                 </div>
                 {context === "incognito" ? (
-                  <p className="hint">
-                    Checks run in regular windows only. To check this private
-                    session, open mullvad.net/check in a private tab.
-                  </p>
-                ) : null}
-                <ul className="checks" hidden={context === "incognito"}>
-                  {checkRows.map(([name, state]) => {
-                    const [tone, text] = checkStatus(state);
-                    return (
-                      <li key={name}>
-                        <Mark tone={tone} />
-                        <span className="check-name">{name}</span>
-                        <span className="data">{text}</span>
-                      </li>
-                    );
-                  })}
-                </ul>
-                <details hidden={context === "incognito"}>
-                  <summary>Observations & check scope</summary>
-                  <p className="hint">
-                    Browser-route observations, not an active-tab check or proof
-                    of DNS leak prevention. The browser proxy can affect these
-                    results.
-                  </p>
-                  {checkRows.map(([name, state]) => (
-                    <Observation
-                      key={name}
-                      title={name === "DNS" ? "DNS resolvers" : name}
-                      state={state}
-                    />
-                  ))}
-                </details>
+                  <>
+                    <p className="hint">
+                      Checks only run in regular windows. Mullvad's own check
+                      works in Incognito.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => void openTab("https://mullvad.net/check")}
+                    >
+                      Open mullvad.net/check
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    {canonical.ok &&
+                    !checksCoverSite(canonical.value, routing, servers) ? (
+                      <p className="hint">
+                        These results don't apply to {canonical.value}, which
+                        takes a different route.
+                      </p>
+                    ) : null}
+                    <ul className="checks">
+                      {checkRows.map(([name, state]) => {
+                        const [tone, text, detail] = checkStatus(state);
+                        return (
+                          <li key={name}>
+                            <Mark tone={tone} />
+                            <span className="check-name">{name}</span>
+                            <span className="check-value">
+                              {text}
+                              {detail ? (
+                                <small className="data">{detail}</small>
+                              ) : null}
+                            </span>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </>
+                )}
+              </section>
+            ) : null}
+            {isOptions && section === "routing" ? (
+              <section className="card">
+                <h2>Preferences</h2>
+                <fieldset disabled={busy}>
+                  <div className="row">
+                    <label className="switch">
+                      <span>
+                        Reload the current website after routing changes in the
+                        popup
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={snapshot.settings.preferences.autoReload}
+                        onChange={(e) =>
+                          mutate({
+                            type: "settings.update",
+                            patch: { autoReload: e.target.checked },
+                          })
+                        }
+                      />
+                    </label>
+                  </div>
+                  <div className="row">
+                    <h3>Incognito</h3>
+                    <p className="meta">
+                      {snapshot.incognitoAllowed
+                        ? "Allowed in Incognito."
+                        : "Not allowed in Incognito. Turn on Allow in Incognito in the extension's details."}
+                    </p>
+                    <p className="hint">
+                      Incognito windows use your regular routing until you
+                      change it in one of them. Those changes last until you
+                      close the last Incognito window.
+                    </p>
+                    {!snapshot.incognitoAllowed ? (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void openTab(
+                            `chrome://extensions/?id=${chrome.runtime.id}`,
+                          )
+                        }
+                      >
+                        Open extension details
+                      </button>
+                    ) : null}
+                  </div>
+                </fieldset>
               </section>
             ) : null}
             {isOptions && section === "privacy" ? (
               <section className="card">
-                <h2>Chrome privacy</h2>
-                <p className="meta">
-                  Optional privacy permission:{" "}
-                  {snapshot.privacy.permissionGranted
-                    ? "Granted"
-                    : "Not granted"}
-                </p>
-                <div className="row">
-                  <h3>WebRTC non-proxied UDP</h3>
-                  <p className="meta">
-                    Current policy: {snapshot.privacy.webRtc.value ?? "Unknown"}{" "}
-                    · Ownership:{" "}
-                    {snapshot.privacy.webRtc.ownership.replaceAll("_", " ")}
-                  </p>
-                  <p className="hint">
-                    Restrict non-proxied UDP to reduce WebRTC IP exposure. This
-                    does not disable WebRTC.
-                  </p>
-                  <div className="actions">
+                <h2>Privacy</h2>
+                <fieldset disabled={busy}>
+                  {privacyControls.map((item) => {
+                    const locked =
+                      item.state.ownership ===
+                        "controlled_by_other_extensions" ||
+                      item.state.ownership === "not_controllable";
+                    return (
+                      <div className="row" key={item.control}>
+                        <label className="switch">
+                          <span>{item.label}</span>
+                          <input
+                            type="checkbox"
+                            disabled={locked}
+                            checked={
+                              item.state.ownership ===
+                                "controlled_by_this_extension" && item.on
+                            }
+                            onChange={(e) =>
+                              privacy(
+                                item.control,
+                                e.target.checked ? item.enable : undefined,
+                              )
+                            }
+                          />
+                        </label>
+                        <p className="hint">
+                          {locked
+                            ? "Another extension or a Chrome policy controls this setting."
+                            : item.hint}
+                        </p>
+                      </div>
+                    );
+                  })}
+                  <div className="row">
+                    <h3>Secure DNS</h3>
+                    <p className="hint">
+                      Websites that connect directly look up addresses with
+                      Chrome's DNS setting. Make sure Use secure DNS isn't set
+                      to another provider.
+                    </p>
                     <button
                       type="button"
-                      className="primary"
-                      disabled={busy}
-                      onClick={() => privacy("webRtcNonProxiedUdp", true)}
+                      onClick={() => void openTab("chrome://settings/security")}
                     >
-                      Restrict non-proxied UDP
-                    </button>
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => privacy("webRtcNonProxiedUdp")}
-                    >
-                      Restore WebRTC override
-                    </button>
-                  </div>
-                </div>
-                <div className="row">
-                  <h3>Network prediction</h3>
-                  <p className="meta">
-                    Current state:{" "}
-                    {snapshot.privacy.networkPrediction.value === null
-                      ? "Unknown"
-                      : snapshot.privacy.networkPrediction.value
-                        ? "Enabled"
-                        : "Disabled"}{" "}
-                    · Ownership:{" "}
-                    {snapshot.privacy.networkPrediction.ownership.replaceAll(
-                      "_",
-                      " ",
-                    )}
-                  </p>
-                  <div className="actions">
-                    <button
-                      type="button"
-                      className="primary"
-                      disabled={busy}
-                      onClick={() => privacy("networkPrediction", false)}
-                    >
-                      Disable prediction
-                    </button>
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => privacy("networkPrediction")}
-                    >
-                      Restore prediction override
+                      Open DNS settings
                     </button>
                   </div>
-                </div>
-                <div className="row">
-                  <h3>Recommended checks</h3>
-                  <p className="hint">
-                    Review Chrome's “Use secure DNS” setting and your VPN DNS
-                    configuration. Chrome cannot reproduce Firefox's per-site
-                    proxy DNS controls.
-                  </p>
-                </div>
+                </fieldset>
               </section>
             ) : null}
             {isOptions && section === "history" ? (
@@ -1124,7 +1125,7 @@ export function App({ context }: { context: BrowserContext }) {
                 <h2>Location history</h2>
                 <fieldset disabled={busy}>
                   <label className="switch">
-                    <span>Remember location usage</span>
+                    <span>Remember the locations you use</span>
                     <input
                       type="checkbox"
                       checked={snapshot.settings.preferences.historyEnabled}
@@ -1137,10 +1138,10 @@ export function App({ context }: { context: BrowserContext }) {
                     />
                   </label>
                   <p className="hint">
-                    Incognito activity does not enter persistent history.
+                    Incognito windows don't add to history.
                   </p>
                   {snapshot.history.length === 0 ? (
-                    <p className="empty">No saved locations yet.</p>
+                    <p className="empty">No locations yet.</p>
                   ) : (
                     <>
                       {snapshot.history.map((entry) => (
@@ -1148,8 +1149,8 @@ export function App({ context }: { context: BrowserContext }) {
                           <span>
                             {entry.city}, {entry.country}
                             <small>
-                              {relayName(entry.hostname)} · Used {entry.count}{" "}
-                              {entry.count === 1 ? "time" : "times"} ·{" "}
+                              {relayName(entry.hostname)} · Used{" "}
+                              {plural(entry.count, "time")} ·{" "}
                               {new Date(entry.lastUsedAt).toLocaleString()}
                             </small>
                           </span>
@@ -1181,7 +1182,7 @@ export function App({ context }: { context: BrowserContext }) {
                         type="button"
                         className="danger"
                         onClick={() => {
-                          if (confirm("Clear saved location history?"))
+                          if (confirm("Clear your location history?"))
                             void mutate({ type: "history.clear" });
                         }}
                       >
@@ -1196,9 +1197,8 @@ export function App({ context }: { context: BrowserContext }) {
               <section className="card">
                 <h2>Import / export</h2>
                 <p className="hint">
-                  Import a native backup or upstream Firefox settings JSON.
-                  Incompatible endpoints and Firefox-only DNS settings require
-                  correction before import.
+                  Import a backup from this extension or settings exported from
+                  Mullvad's Firefox extension.
                 </p>
                 <button type="button" disabled={busy} onClick={exportSettings}>
                   Export settings
@@ -1223,7 +1223,7 @@ export function App({ context }: { context: BrowserContext }) {
                         setError(
                           err instanceof Error
                             ? err.message
-                            : "Cannot read this file.",
+                            : "Couldn't read this file.",
                         );
                       }
                     }
@@ -1253,32 +1253,31 @@ export function App({ context }: { context: BrowserContext }) {
                     <h3>
                       {preview.format === "firefox"
                         ? "Firefox settings"
-                        : "Native backup"}{" "}
+                        : "Backup"}{" "}
                       ready to import
                     </h3>
                     <p>
-                      This replaces existing routes with{" "}
-                      {preview.routing.rules.length} rules and{" "}
-                      {preview.routing.exclusions.length} exclusions. Global
-                      server: {preview.routing.globalServerId ?? "None"}. Global
-                      routing:{" "}
-                      {preview.routing.enabled ? "Enabled" : "Disabled"}.
+                      Replaces your routes with{" "}
+                      {plural(preview.routing.rules.length, "rule")} and{" "}
+                      {plural(preview.routing.exclusions.length, "exclusion")}.
+                      Proxy all websites:{" "}
+                      {preview.routing.enabled ? "on" : "off"}. Global location:{" "}
+                      {preview.routing.globalServerId
+                        ? serverLabel(preview.routing.globalServerId)
+                        : "none"}
+                      .
                     </p>
                     <p>
                       {preview.format === "firefox"
-                        ? "Existing preferences, history and random mode stay unchanged."
-                        : "Preferences and history will also be replaced."}
+                        ? "Your preferences, history, favorites and random mode stay as they are."
+                        : `Also replaces your preferences, history${preview.favorites ? " and favorites" : ""}.`}
                     </p>
                     <button
                       type="button"
                       className="danger"
                       disabled={busy}
                       onClick={async () => {
-                        if (
-                          confirm(
-                            "Replace existing settings with this validated import?",
-                          )
-                        ) {
+                        if (confirm("Replace your settings with this file?")) {
                           if (
                             await mutate({
                               type: "settings.import",
@@ -1295,66 +1294,11 @@ export function App({ context }: { context: BrowserContext }) {
                 ) : null}
               </section>
             ) : null}
-            {isOptions ? (
-              <section className="card">
-                <h2>Preferences & Incognito</h2>
-                <fieldset disabled={busy}>
-                  <label className="switch">
-                    <span>
-                      Reload the active website after popup routing changes
-                    </span>
-                    <input
-                      type="checkbox"
-                      checked={snapshot.settings.preferences.autoReload}
-                      onChange={(e) =>
-                        mutate({
-                          type: "settings.update",
-                          patch: { autoReload: e.target.checked },
-                        })
-                      }
-                    />
-                  </label>
-                </fieldset>
-                <p className="hint">
-                  One preference for regular and Incognito popups. Reloads only
-                  the active HTTP or HTTPS website in the popup's window.
-                  Options changes never reload a website.
-                </p>
-                <div className="row">
-                  <p className="meta">
-                    Incognito access:{" "}
-                    {snapshot.incognitoAllowed
-                      ? "Allowed by Chrome"
-                      : "Not allowed"}
-                    . Open Chrome → Extensions → Manage extensions → this
-                    extension → Allow in Incognito to opt in.
-                  </p>
-                  {context === "regular" ? (
-                    <p className="hint">
-                      This regular page does not inspect or monitor private
-                      routing.
-                    </p>
-                  ) : null}
-                  <p className="hint">
-                    Open the popup in an Incognito window to see effective
-                    private-context ownership. Incognito diagnostics may be
-                    blocked when Chrome cannot guarantee context-correct checks.
-                    Regular routing applies until you create a private-session
-                    override. Private routing changes and activity expire when
-                    the last Incognito window closes.
-                  </p>
-                </div>
-              </section>
-            ) : null}
           </>
         )}
       </main>
       {isOptions ? (
-        <footer>
-          Requires Mullvad VPN · GPL-3.0-or-later
-          <br />
-          Independent port. Not an official Mullvad product.
-        </footer>
+        <footer>Requires Mullvad VPN · GPL-3.0-or-later</footer>
       ) : null}
     </div>
   );

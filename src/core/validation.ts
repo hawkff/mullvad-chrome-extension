@@ -68,7 +68,9 @@ export function host(value: unknown): string {
   ) {
     // Bare IPv6 is accepted, but a DNS name with a port is not.
     if (!engine.ipv6(input.toLowerCase()))
-      throw new Error("Expected a host only, without URL syntax or a port");
+      throw new Error(
+        "Enter a domain such as example.com, without https://, a path or a port.",
+      );
   }
   let ascii = input;
   if (Array.from(input).some((character) => character.charCodeAt(0) > 127)) {
@@ -77,7 +79,7 @@ export function host(value: unknown): string {
   const result = engine.canonical(ascii);
   if (!result)
     throw new Error(
-      "Invalid host: use a hostname, not a URL, path, port or wildcard",
+      "Enter a domain such as example.com, without https://, a path or a port.",
     );
   return result;
 }
@@ -95,7 +97,7 @@ function serverId(value: unknown, servers: readonly Server[]): string {
   const id = string(value);
   if (id !== INTERNAL_DEFAULT_SERVER_ID && !servers.some((s) => s.id === id))
     throw new Error(
-      `Unknown server: ${id}; refresh servers or select a supported endpoint`,
+      `Server ${id} isn't in the server list. Refresh the list and try again.`,
     );
   return id;
 }
@@ -215,11 +217,11 @@ function firefoxProxy(
     (d.proxyDNS !== undefined && boolean(d.proxyDNS) === false)
   )
     throw new Error(
-      "proxyDNS=false is incompatible: Chrome SOCKS5 does not support a per-site DNS toggle",
+      "Chrome always sends DNS through the proxy. Turn on proxy DNS in Firefox and export again.",
     );
   if (!Object.keys(p).length && !enabled) return { enabled, serverId: null };
   if (p.type !== "socks")
-    throw new Error("Only Firefox SOCKS5 (type=socks) proxies are supported");
+    throw new Error("Only SOCKS5 proxies can be imported.");
   const endpoint = host(p.host);
   const port = integer(p.port, 1, 65535);
   const id =
@@ -231,7 +233,7 @@ function firefoxProxy(
         )?.id;
   if (!id)
     throw new Error(
-      `Unrecognized proxy endpoint ${endpoint}:${port}; refresh the server catalog or choose a Mullvad server`,
+      `Proxy ${endpoint}:${port} isn't in the server list. Refresh the list and try again.`,
     );
   if (
     d.server &&
@@ -239,9 +241,7 @@ function firefoxProxy(
     d.server !== id &&
     d.server !== relayName(id)
   )
-    throw new Error(
-      `Proxy details server does not match endpoint: ${d.server}`,
-    );
+    throw new Error(`Server ${d.server} doesn't match its proxy address.`);
   return { enabled, serverId: id };
 }
 function favorites(value: unknown): string[] {
@@ -259,7 +259,8 @@ export function persisted(input: unknown): ImportPreview {
     ["version", "settings", "history", "favorites"],
     ["version", "settings", "history"],
   );
-  if (v.version !== 1) throw new Error("Unsupported native settings version");
+  if (v.version !== 1)
+    throw new Error("This backup's version isn't supported.");
   const settings = object(v.settings);
   keys(settings, ["routing", "preferences"]);
   return {
