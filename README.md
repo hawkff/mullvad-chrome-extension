@@ -45,6 +45,8 @@ A Chrome Manifest V3 port of the [Mullvad browser extension](https://github.com/
 2. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and select the unzipped folder.
 3. Connect Mullvad VPN, open the extension's popup and choose a location.
 
+The same steps work in Chromium and in Chromium-based browsers such as Helium.
+
 To update, unzip the new release into the same folder and click the reload button on the extension's card in `chrome://extensions`. Chrome ties an unpacked extension's settings to its folder, so a different folder starts with empty settings.
 
 To build it yourself, install [Bun](https://bun.sh) 1.4.3 or later and run:
