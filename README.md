@@ -41,17 +41,20 @@ A Chrome Manifest V3 port of the [Mullvad browser extension](https://github.com/
 
 ## Install
 
-1. Install [Bun](https://bun.sh) 1.4.3 or later, then build the extension:
-
-   ```sh
-   bun install --frozen-lockfile
-   bun run build
-   ```
-
-2. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and select `dist/production`.
+1. Download `mullvad-proxy-<version>.zip` from the [latest release](https://github.com/hawkff/mullvad-chrome-extension/releases/latest) and unzip it.
+2. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and select the unzipped folder.
 3. Connect Mullvad VPN, open the extension's popup and choose a location.
 
-After you rebuild, click the reload button on the extension's card in `chrome://extensions`.
+To update, unzip the new release into the same folder and click the reload button on the extension's card in `chrome://extensions`. Chrome ties an unpacked extension's settings to its folder, so a different folder starts with empty settings.
+
+To build it yourself, install [Bun](https://bun.sh) 1.4.3 or later and run:
+
+```sh
+bun install --frozen-lockfile
+bun run build
+```
+
+Then load `dist/production` instead. After you rebuild, click the reload button on the extension's card.
 
 ## Production and development builds
 
@@ -141,4 +144,4 @@ After the extension reloads or the worker restarts, look up the worker target ag
 
 ## License
 
-GPL-3.0-or-later. See [LICENSE.md](LICENSE.md) and [NOTICE.md](NOTICE.md). The bundled public suffix code keeps its [MIT notice](src/core/tldts.LICENSE).
+GPL-3.0-or-later. See [LICENSE](LICENSE) and [NOTICE.md](NOTICE.md). The bundled public suffix code keeps its [MIT notice](src/core/tldts.LICENSE).
