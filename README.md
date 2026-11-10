@@ -49,7 +49,7 @@ You need Chrome 128 or later.
 
 The same steps work in Chromium and in Chromium-based browsers such as Helium.
 
-To update, unzip the new release into the same folder and click the reload button on the extension's card in `chrome://extensions`. Restarting Chrome isn't enough: Chrome keeps running the old background script until you click reload. Chrome ties an unpacked extension's settings to its folder, so a different folder starts with empty settings.
+To update, unzip the new release into the same folder and click the reload button on the extension's card in `chrome://extensions`. Restarting Chrome isn't enough. It keeps running the old background script until you click reload. Chrome ties an unpacked extension's settings to its folder, so a different folder starts with empty settings.
 
 To build it yourself, install [Bun](https://bun.sh) 1.4.3 or later and run:
 
