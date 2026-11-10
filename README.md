@@ -41,13 +41,15 @@ A Chrome Manifest V3 port of the [Mullvad browser extension](https://github.com/
 
 ## Install
 
+You need Chrome 128 or later.
+
 1. Download `mullvad-proxy-<version>.zip` from the [latest release](https://github.com/hawkff/mullvad-chrome-extension/releases/latest) and unzip it.
 2. Open `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and select the unzipped folder.
 3. Connect Mullvad VPN, open the extension's popup and choose a location.
 
 The same steps work in Chromium and in Chromium-based browsers such as Helium.
 
-To update, unzip the new release into the same folder and click the reload button on the extension's card in `chrome://extensions`. Chrome ties an unpacked extension's settings to its folder, so a different folder starts with empty settings.
+To update, unzip the new release into the same folder and click the reload button on the extension's card in `chrome://extensions`. Restarting Chrome isn't enough: Chrome keeps running the old background script until you click reload. Chrome ties an unpacked extension's settings to its folder, so a different folder starts with empty settings.
 
 To build it yourself, install [Bun](https://bun.sh) 1.4.3 or later and run:
 
