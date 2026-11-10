@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Mullvad Proxy",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Route all websites or only some through Mullvad SOCKS5 proxies, and check your connection. Requires Mullvad VPN.",
   "minimum_chrome_version": "128",
   "icons": {
