@@ -36,7 +36,28 @@ export function generatePac(context: RoutingContext): string {
   // Services must apply this PAC with mandatory:true so runtime errors cannot fall back to DIRECT.
   if (!valid.ok)
     return 'function FindProxyForURL(){throw new Error("Invalid routing configuration");}';
-  const data = JSON.stringify({ ...context, settings: valid.value })
+  const settings = valid.value;
+  // Chrome stores the PAC in the profile and hands it back on every status read, so it carries
+  // only the servers its routes can pick: the online pool in random mode, else the chosen ones.
+  const used = new Set(
+    settings.randomMode
+      ? context.servers
+          .filter((server) => server.online)
+          .map((server) => server.id)
+      : [
+          settings.globalServerId,
+          ...settings.rules.map((rule) => rule.serverId),
+        ],
+  );
+  const data = JSON.stringify({
+    settings,
+    servers: context.servers
+      .filter((server) => used.has(server.id))
+      .map(({ id, ipv4, port, online }) => ({ id, ipv4, port, online })),
+    // Every mode keeps the seed. The private seed is also what makes an Incognito PAC differ from
+    // the regular one, which is how the worker tells an installed override from an inherited setting.
+    sessionSeed: context.sessionSeed,
+  })
     .replace(/</g, "\\u003c")
     .replace(/\u2028/g, "\\u2028")
     .replace(/\u2029/g, "\\u2029");

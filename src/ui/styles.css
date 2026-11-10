@@ -71,6 +71,9 @@ h2 {
   font-size: 16px;
   font-weight: 600;
 }
+h2:last-child {
+  margin-bottom: 0;
+}
 h3 {
   margin: 14px 0 4px;
   font-size: 14px;
@@ -142,6 +145,9 @@ button:disabled {
 .danger:hover:not(:disabled) {
   background: rgb(227 64 57 / 16%);
 }
+.danger:active:not(:disabled) {
+  background: rgb(227 64 57 / 28%);
+}
 .ghost {
   min-height: 28px;
   padding: 3px 8px;
@@ -151,6 +157,10 @@ button:disabled {
 }
 .ghost:hover:not(:disabled) {
   background: var(--card);
+  color: var(--text);
+}
+.ghost:active:not(:disabled) {
+  background: var(--blue);
   color: var(--text);
 }
 
@@ -168,6 +178,9 @@ textarea {
 input::placeholder,
 textarea::placeholder {
   color: #8ba5c1;
+}
+input[aria-invalid="true"] {
+  border-color: var(--red);
 }
 textarea {
   resize: vertical;
@@ -448,7 +461,14 @@ main > .lead {
   justify-content: space-between;
   gap: 8px;
 }
+/* When a long timestamp wraps the row, the action keeps its right edge. */
+.meta-row > button {
+  margin-left: auto;
+}
+/* Positioned, so the screen-reader text of rows scrolled out of view stays inside the list
+   instead of stretching the page. */
 .server-list {
+  position: relative;
   max-height: 280px;
   margin: 8px 0 12px;
   padding: 4px 0;
@@ -457,6 +477,9 @@ main > .lead {
   background: var(--navy);
   list-style: none;
   scroll-padding: 8px;
+}
+.server-list:empty {
+  display: none;
 }
 .country {
   margin: 0;
@@ -499,6 +522,9 @@ main > .lead {
 }
 .server-list button:hover:not(:disabled) {
   background: var(--card);
+}
+.server-list button:active:not(:disabled) {
+  background: var(--blue);
 }
 /* Full-width rows sit in a scroll container that clips outside outlines. */
 .server-list button:focus-visible {
@@ -590,7 +616,7 @@ main > .lead {
 }
 .rule > label,
 .rule > span {
-  flex: 1;
+  flex: 1 1 220px;
   min-width: 160px;
   margin: 0;
   color: var(--text);
@@ -625,7 +651,8 @@ main > .lead {
   color: var(--muted);
   font-weight: 600;
 }
-.tabs button:hover:not(:disabled) {
+.tabs button:hover:not(:disabled),
+.tabs button:active:not(:disabled) {
   background: transparent;
   color: var(--text);
 }
@@ -655,6 +682,33 @@ footer {
   padding-top: 6px;
   overflow-y: auto;
   scroll-padding: 12px;
+}
+/* The popup's picker takes the height that is left: its list shrinks before the last button
+   leaves the view. Flex items keep both of their margins, hence the resets. */
+.popup main,
+.popup .picker {
+  display: flex;
+  flex-direction: column;
+}
+.popup .picker {
+  min-height: 0;
+}
+.popup .picker > * {
+  flex-shrink: 0;
+}
+.popup .picker > .server-list {
+  flex-shrink: 1;
+  min-height: 96px;
+}
+.popup .picker > .card-head,
+.popup .picker > .hint {
+  margin-bottom: 0;
+}
+.popup .picker > .meta {
+  margin: 8px 0 0;
+}
+.popup .picker > button {
+  align-self: flex-start;
 }
 .options {
   max-width: 760px;
@@ -686,6 +740,28 @@ footer {
   }
   .popup {
     max-width: 100vw;
+  }
+}
+/* High-contrast themes drop author backgrounds, which is all the switch and the toast are made
+   of, and they paint the tabs' transparent underlines. */
+@media (forced-colors: active) {
+  .switch input {
+    appearance: auto;
+    width: 18px;
+    height: 18px;
+  }
+  .switch input::before {
+    content: none;
+  }
+  .tabs button {
+    margin-bottom: 0;
+    border-bottom-color: Canvas;
+  }
+  .tabs button[aria-current] {
+    border-bottom-color: Highlight;
+  }
+  .feedback {
+    border: 1px solid CanvasText;
   }
 }
 @media (prefers-reduced-motion: no-preference) {

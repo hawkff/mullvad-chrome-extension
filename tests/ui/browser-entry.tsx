@@ -36,6 +36,19 @@ const tab = {
 };
 if (location.search.includes("local")) state.settings.routing.randomMode = true;
 if (location.search.includes("retired")) state.favorites = ["retired-relay"];
+if (location.search.includes("stale") && state.servers.status === "ready")
+  state.servers.updatedAt = 1;
+if (location.search.includes("empty") && state.servers.status === "ready")
+  state.servers.value = [];
+// Enough rows to overflow the list.
+if (location.search.includes("many") && state.servers.status === "ready") {
+  const [first] = state.servers.value;
+  state.servers.value = Array.from({ length: 60 }, (_, index) => ({
+    ...first,
+    id: `row-${index}`,
+    hostname: `row-${index}.example`,
+  }));
+}
 Object.defineProperty(globalThis, "chrome", {
   value: {
     extension: { inIncognitoContext: incognito },
@@ -62,6 +75,9 @@ Object.defineProperty(globalThis, "chrome", {
           const { autoReload, historyEnabled, ...routing } =
             command.patch ?? {};
           Object.assign(state.settings.routing, routing);
+          // Like the worker, a global route without a location uses the VPN server.
+          if (routing.enabled)
+            state.settings.routing.globalServerId ??= "internal-default";
           Object.assign(
             state.settings.preferences,
             autoReload === undefined ? {} : { autoReload },
@@ -75,6 +91,19 @@ Object.defineProperty(globalThis, "chrome", {
             (id) => id !== command.serverId,
           );
           if (command.favorite) state.favorites.push(command.serverId);
+        }
+        if (command.type === "servers.refresh") {
+          // Like the worker, refuse Incognito refreshes and stamp a loaded list.
+          if (state.context === "incognito")
+            return {
+              ok: false,
+              error: {
+                code: "blocked",
+                message: "Refresh the server list from a regular window.",
+              },
+            };
+          if (state.servers.status === "ready")
+            state.servers.updatedAt = Date.now();
         }
         if (command.type === "diagnostics.run")
           return {

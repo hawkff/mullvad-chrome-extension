@@ -115,6 +115,7 @@ export class Controller {
   private privateEpoch = 0;
   private startupError = false;
   private privateWindows = new Set<number>();
+  private download?: Promise<{ value: Server[]; updatedAt: number }>;
   private allowed(): Promise<boolean> {
     return chrome.extension.isAllowedIncognitoAccess();
   }
@@ -513,7 +514,7 @@ export class Controller {
     ]);
   }
   private async dispatch(
-    command: Exclude<Command, { type: "diagnostics.run" }>,
+    command: Exclude<Command, { type: "diagnostics.run" | "servers.refresh" }>,
   ): Promise<unknown> {
     const context = command.context ?? "regular";
     if (context === "incognito" && !(await this.privateUsable()))
@@ -582,8 +583,12 @@ export class Controller {
           command.patch;
         if (enabled !== undefined) {
           routing.enabled = enabled;
-          if (enabled && routing.globalServerId === null)
-            routing.globalServerId = INTERNAL_DEFAULT_SERVER_ID;
+          if (enabled) {
+            routing.globalServerId ??= INTERNAL_DEFAULT_SERVER_ID;
+            // Like a rule, the global route can't switch on with a server the PAC would block.
+            if (!state.settings.routing.enabled)
+              checkServer(routing.globalServerId);
+          }
         }
         if (randomMode !== undefined) routing.randomMode = randomMode;
         if (autoReload !== undefined) {
@@ -682,38 +687,6 @@ export class Controller {
         if (command.favorite) next.favorites.push(id);
         break;
       }
-      case "servers.refresh": {
-        if (context === "incognito")
-          throw new Failure(
-            "blocked",
-            "Refresh the server list from a regular window.",
-          );
-        const updatedAt = Date.now();
-        let value: Server[];
-        try {
-          const result = this.routingCore.validateServers(
-            await requestJson(
-              "https://api.mullvad.net/network/v1-beta1/socks-proxies",
-            ),
-          );
-          if (!result.ok) throw new Error(result.error);
-          value = result.value;
-          await write(chrome.storage.local, CACHE, { value, updatedAt });
-        } catch {
-          throw new Failure(
-            "offline",
-            "Couldn't load the server list. Your routing hasn't changed.",
-          );
-        }
-        this.servers = { status: "ready", value, updatedAt };
-        // Freeze the random pool for this browser session, including worker restarts.
-        if (!this.session.pool.length) {
-          this.session.pool = value;
-          await this.saveSession();
-        }
-        await this.reconcileAll();
-        return this.snapshot(context);
-      }
       case "privacy.set":
       case "privacy.restore": {
         if (context === "incognito")
@@ -807,6 +780,56 @@ export class Controller {
       return this.failure(error);
     }
   }
+  private async refreshServers(
+    context: BrowserContext,
+  ): Promise<Response<unknown>> {
+    try {
+      if (context === "incognito")
+        throw new Failure(
+          "blocked",
+          "Refresh the server list from a regular window.",
+        );
+      // Overlapping refreshes share one download, so an older response can't land after a newer one.
+      this.download ??= this.downloadServers().finally(() => {
+        this.download = undefined;
+      });
+      const { value, updatedAt } = await this.download;
+      return {
+        ok: true,
+        value: await this.queued(async () => {
+          this.servers = { status: "ready", value, updatedAt };
+          // Freeze the random pool for this browser session, including worker restarts.
+          if (!this.session.pool.length) {
+            this.session.pool = value;
+            await this.saveSession();
+          }
+          await this.reconcileAll();
+          return this.snapshot(context);
+        }),
+      };
+    } catch (error) {
+      return this.failure(error);
+    }
+  }
+  private async downloadServers() {
+    const updatedAt = Date.now();
+    try {
+      const result = this.routingCore.validateServers(
+        await requestJson(
+          "https://api.mullvad.net/network/v1-beta1/socks-proxies",
+        ),
+      );
+      if (!result.ok) throw new Error(result.error);
+      const value = result.value;
+      await write(chrome.storage.local, CACHE, { value, updatedAt });
+      return { value, updatedAt };
+    } catch {
+      throw new Failure(
+        "offline",
+        "Couldn't load the server list. Your routing hasn't changed.",
+      );
+    }
+  }
   execute(
     input: unknown,
     sender?: chrome.runtime.MessageSender,
@@ -837,13 +860,23 @@ export class Controller {
         }
         await this.initialize();
         const command = validation.value;
-        // Connection checks wait seconds on the network; holding the queue would stall routing changes.
-        if (command.type === "diagnostics.run") return command;
+        // These wait seconds on the network; holding the queue would stall routing changes.
+        if (
+          command.type === "diagnostics.run" ||
+          command.type === "servers.refresh"
+        )
+          return command;
         return { ok: true as const, value: await this.dispatch(command) };
       } catch (error) {
         return this.failure(error);
       }
-    }).then((result) => ("type" in result ? this.diagnose(result) : result));
+    }).then((result) =>
+      !("type" in result)
+        ? result
+        : result.type === "diagnostics.run"
+          ? this.diagnose(result)
+          : this.refreshServers(result.context ?? "regular"),
+    );
   }
   client<C extends Command>(command: C): Promise<Response<CommandResult<C>>> {
     // execute validates both UI and development commands before using the typed contract.

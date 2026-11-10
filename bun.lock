@@ -7,7 +7,7 @@
       "dependencies": {
         "react": "19.3.1",
         "react-dom": "19.3.1",
-        "tldts": "7.4.19",
+        "tldts-icann": "7.4.19",
       },
       "devDependencies": {
         "@biomejs/biome": "2.5.15",
@@ -76,9 +76,9 @@
 
     "scheduler": ["scheduler@0.28.0", "", {}, "sha512-juorfCmIkIw8tT+p5BXSm6PJjQF/ycEYmKyzURCIt/RaZIhL+PulbQ9Yu2z1HdOJDdqDTlxA1+xKBmHXJsczAw=="],
 
-    "tldts": ["tldts@7.4.19", "", { "dependencies": { "tldts-core": "^7.4.19" }, "bin": { "tldts": "bin/cli.js" } }, "sha512-48dH6aSpQnpbzDUc4vIQZ1VjB8tkK+e8c1yx05/SZK+rkssgjEOlxDd/yU8/a4vGYQ9vRgJr9dwMq9TJ0b3X2Q=="],
-
     "tldts-core": ["tldts-core@7.4.19", "", {}, "sha512-goNXV6Ho9TIOfpJZanTd6CKG5DyYgYAL+k+22T0SLh8l6+KHIfBUPFuePuSZv05UttIaaLmI9tb7TmGIdK5AkQ=="],
+
+    "tldts-icann": ["tldts-icann@7.4.19", "", { "dependencies": { "tldts-core": "^7.4.19" } }, "sha512-lnGUR5BZm5UpNDYMBFGAr9pxS2RTUr/euXuJ9o1irR+zKhsBAFUn7quHoZt8UP/eIwykp4ye5f56bCjMBytbTg=="],
 
     "tsc-rs": ["tsc-rs@0.7.0", "", { "optionalDependencies": { "@tsc-rs/darwin-arm64": "0.7.0", "@tsc-rs/darwin-x64": "0.7.0", "@tsc-rs/linux-arm64": "0.7.0", "@tsc-rs/linux-x64": "0.7.0", "@tsc-rs/win32-arm64": "0.7.0", "@tsc-rs/win32-x64": "0.7.0" }, "bin": { "tsc-rs": "bin/tsc-rs" } }, "sha512-diVCBljoXLQjvXRkIuamR3QRrmNyqgYDePKA5SFXTSDPSjku2a2JXj/bOxG4DoPUbYkzWl/XFu1689z/46TCaA=="],
 

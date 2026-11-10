@@ -54,12 +54,7 @@ export interface ProxyStatus {
   status: "unknown" | "pending" | "ready" | "offline" | "blocked" | "error";
   message?: string;
   scope: BrowserContext;
-  settingScope:
-    | "regular"
-    | "regular_only"
-    | "incognito_persistent"
-    | "incognito_session_only"
-    | "unknown";
+  settingScope: "regular" | "incognito_session_only" | "unknown";
 }
 export type RouteDecision =
   | { kind: "direct"; reason: "local" | "excluded" | "disabled" | "unmatched" }
