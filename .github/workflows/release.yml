@@ -26,7 +26,7 @@ jobs:
           # The zip carries bundled code, so it needs the GPL and the bundled packages' MIT notices.
           cp LICENSE NOTICE.md dist/production/
           mkdir dist/production/licenses
-          for pkg in react react-dom scheduler tldts tldts-core; do
+          for pkg in react react-dom scheduler tldts-icann tldts-core; do
             cp "node_modules/$pkg/LICENSE" "dist/production/licenses/$pkg.txt"
           done
           (cd dist/production && zip -qr "$GITHUB_WORKSPACE/mullvad-proxy-$TAG.zip" .)

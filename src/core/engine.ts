@@ -1,4 +1,4 @@
-import { getDomain } from "tldts";
+import { getDomain } from "tldts-icann";
 import type { RouteDecision, RoutingContext } from "../shared/state";
 
 // This closure is serialized into PAC: keep it platform-independent and self-contained.

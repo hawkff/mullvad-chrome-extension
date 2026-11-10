@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { engine } from "../core/engine";
 import { checked, relayName, host as validateHost } from "../core/validation";
 import type { Command, CommandResult } from "../shared/messages";
@@ -17,13 +17,16 @@ import {
   client,
   currentWebsiteTab,
   exitStatus,
+  formatTime,
   freshness,
   incognitoScopeDescription,
-  STALE_AFTER,
+  isStale,
   searchServers,
 } from "./client";
 
 const isOptions = location.pathname.endsWith("options.html");
+// One shared empty list keeps memoized results stable while no list is loaded.
+const noServers: Server[] = [];
 const icons: Record<Tone, string> = {
   on: "M5 12.5l4.5 4.5L19 7.5",
   off: "M7 12h10",
@@ -190,8 +193,8 @@ export function App({ context }: { context: BrowserContext }) {
   }, [context]);
   // Loads state without disabling controls or announcing it.
   const load = useCallback(
-    () =>
-      client({ type: "snapshot", context }).then(
+    (type: "snapshot" | "servers.refresh" = "snapshot") =>
+      client({ type, context }).then(
         (response) =>
           response.ok
             ? setSnapshot(response.value)
@@ -224,7 +227,11 @@ export function App({ context }: { context: BrowserContext }) {
     command: Exclude<
       Command,
       {
-        type: "settings.export" | "settings.import.preview" | "diagnostics.run";
+        type:
+          | "snapshot"
+          | "settings.export"
+          | "settings.import.preview"
+          | "diagnostics.run";
       }
     >,
     routingChange = false,
@@ -233,13 +240,11 @@ export function App({ context }: { context: BrowserContext }) {
     if (value) {
       setSnapshot(value);
       setNotice(
-        command.type === "snapshot"
-          ? "Status refreshed."
-          : command.type === "servers.refresh"
-            ? "Server list updated."
-            : command.type === "favorite.set"
-              ? "Favorites updated."
-              : "Settings updated.",
+        command.type === "servers.refresh"
+          ? "Server list updated."
+          : command.type === "favorite.set"
+            ? "Favorites updated."
+            : "Settings updated.",
       );
       if (routingChange && !isOptions) {
         // Confirm that traffic gets through the new route.
@@ -287,13 +292,10 @@ export function App({ context }: { context: BrowserContext }) {
   function openPicker(next: "global" | "site") {
     setTarget(next);
     setPicker(true);
-    const list = snapshot?.servers;
     // Like upstream, load the relay list when the picker opens without a current copy.
-    if (
-      list &&
-      (list.status !== "ready" || Date.now() - list.updatedAt > STALE_AFTER)
-    )
-      void mutate({ type: "servers.refresh" });
+    // It loads beside the picker, which stays usable. Incognito windows can't refresh it.
+    if (context === "regular" && snapshot && isStale(snapshot.servers))
+      void load("servers.refresh");
   }
   async function setRandom(enabled: boolean) {
     // The worker refuses random mode until a relay list has loaded.
@@ -376,13 +378,13 @@ export function App({ context }: { context: BrowserContext }) {
   const effective =
     context === "incognito" ? snapshot?.incognitoProxy : snapshot?.proxy;
   const servers =
-    snapshot?.servers.status === "ready" ? snapshot.servers.value : [];
+    snapshot?.servers.status === "ready" ? snapshot.servers.value : noServers;
   const serverLabel = (id: string) => {
     if (id === INTERNAL_DEFAULT_SERVER_ID) return "Your VPN server";
     const server = servers.find((row) => row.id === id);
     return server
       ? `${server.city}, ${server.country} · ${relayName(server.hostname)}${server.online ? "" : " · Offline"}`
-      : `Unavailable server: ${id}`;
+      : `Unavailable server: ${relayName(id)}`;
   };
   const canonical = checked(() => validateHost(host));
   // The worker validates hosts the same way, so typed input fails here first.
@@ -392,7 +394,11 @@ export function App({ context }: { context: BrowserContext }) {
     : undefined;
   const excluded =
     canonical.ok && (routing?.exclusions.includes(canonical.value) ?? false);
-  const matches = picker ? searchServers(servers, query) : [];
+  // A snapshot brings a new list, so the sorted results last until the next one.
+  const matches = useMemo(
+    () => (picker ? searchServers(servers, query) : []),
+    [picker, servers, query],
+  );
   const current =
     target === "site" ? siteRule?.serverId : routing?.globalServerId;
   const status =
@@ -450,6 +456,9 @@ export function App({ context }: { context: BrowserContext }) {
         : `Follows the global location: ${where}.`;
   })();
   const favorites = snapshot?.favorites ?? [];
+  const recent = (snapshot?.history ?? [])
+    .slice()
+    .sort((a, b) => b.lastUsedAt - a.lastUsedAt);
   // Favorites are shared with regular windows, so private popups show them read-only.
   const toggleFavorite = (server: Server) =>
     context === "regular"
@@ -472,6 +481,8 @@ export function App({ context }: { context: BrowserContext }) {
     countryCode: "",
     city: "",
   });
+  // Before a list has loaded, every favorite would read as no longer listed.
+  const listed = snapshot?.servers.status === "ready";
   const quickGroups = query.trim()
     ? []
     : [
@@ -484,9 +495,7 @@ export function App({ context }: { context: BrowserContext }) {
         },
         {
           label: "Recent",
-          rows: (snapshot?.history ?? [])
-            .slice()
-            .sort((a, b) => b.lastUsedAt - a.lastUsedAt)
+          rows: recent
             .flatMap((entry) =>
               servers.filter(
                 (server) =>
@@ -496,11 +505,11 @@ export function App({ context }: { context: BrowserContext }) {
             )
             .slice(0, 3),
         },
-      ].filter((group) => group.rows.length);
+      ].filter((group) => listed && group.rows.length);
 
   const locationPicker =
     snapshot && picker ? (
-      <section className="card" aria-labelledby="picker-title">
+      <section className="card picker" aria-labelledby="picker-title">
         <div className="card-head">
           <h2 id="picker-title">
             {target === "site" ? "Site location" : "Global location"}
@@ -529,15 +538,21 @@ export function App({ context }: { context: BrowserContext }) {
         />
         <div className="meta-row">
           <p className="meta">{freshness(snapshot.servers)}</p>
-          <button
-            type="button"
-            className="ghost"
-            disabled={busy}
-            onClick={() => mutate({ type: "servers.refresh" })}
-          >
-            Refresh server list
-          </button>
+          {context === "regular" ? (
+            <button
+              type="button"
+              className="ghost"
+              disabled={busy}
+              aria-label="Refresh server list"
+              onClick={() => mutate({ type: "servers.refresh" })}
+            >
+              Refresh
+            </button>
+          ) : null}
         </div>
+        {context === "incognito" && isStale(snapshot.servers) ? (
+          <p className="hint">Refresh the server list from a regular window.</p>
+        ) : null}
         <ul className="server-list">
           {quickGroups.map((group) =>
             group.rows.map((server, index) => (
@@ -580,7 +595,13 @@ export function App({ context }: { context: BrowserContext }) {
           })}
         </ul>
         {matches.length === 0 ? (
-          <p>No servers match. Change your search or refresh the list.</p>
+          <p>
+            {servers.length
+              ? "No servers match your search."
+              : listed
+                ? "The server list is empty."
+                : "The server list hasn't loaded yet."}
+          </p>
         ) : null}
         <button
           type="button"
@@ -713,17 +734,19 @@ export function App({ context }: { context: BrowserContext }) {
         {!snapshot || !routing || !effective || !status ? (
           <section className="card" aria-busy={!error}>
             <h2>Connecting to the extension</h2>
-            <button
-              type="button"
-              disabled={busy}
-              onClick={() => {
-                // Focus reloads keep earlier errors; an explicit retry starts clean.
-                setError("");
-                void load();
-              }}
-            >
-              Retry
-            </button>
+            {error ? (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  // Focus reloads keep earlier errors; an explicit retry starts clean.
+                  setError("");
+                  void load();
+                }}
+              >
+                Retry
+              </button>
+            ) : null}
           </section>
         ) : !isOptions && picker ? (
           locationPicker
@@ -735,7 +758,7 @@ export function App({ context }: { context: BrowserContext }) {
                 <p className="status" data-tone={status.tone}>
                   <Mark tone={status.tone} />
                   <span>
-                    <strong>{status.title}</strong> {status.detail}
+                    <strong>{status.title}.</strong> {status.detail}
                   </span>
                 </p>
                 {context === "incognito" ? (
@@ -751,7 +774,8 @@ export function App({ context }: { context: BrowserContext }) {
                     <strong>{status.title}.</strong> {status.detail}
                   </p>
                 ) : null}
-                {routeWarning ? (
+                {/* An error status already says why the checks can't get through. */}
+                {routeWarning && status.tone !== "error" ? (
                   <p className="notice" data-tone="warn">
                     {routeWarning}
                   </p>
@@ -1144,14 +1168,14 @@ export function App({ context }: { context: BrowserContext }) {
                     <p className="empty">No locations yet.</p>
                   ) : (
                     <>
-                      {snapshot.history.map((entry) => (
+                      {recent.map((entry) => (
                         <div className="rule" key={entry.serverId}>
                           <span>
                             {entry.city}, {entry.country}
                             <small>
                               {relayName(entry.hostname)} · Used{" "}
                               {plural(entry.count, "time")} ·{" "}
-                              {new Date(entry.lastUsedAt).toLocaleString()}
+                              {formatTime(entry.lastUsedAt)}
                             </small>
                           </span>
                           <button

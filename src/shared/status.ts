@@ -33,11 +33,19 @@ export function proxyStatus(
         `Rules for ${plural(rules, "website")}. Other websites connect directly.`,
       );
     const server = servers.find((row) => row.id === routing.globalServerId);
+    // The PAC blocks every website routed to an offline or delisted server.
+    if (
+      routing.globalServerId !== INTERNAL_DEFAULT_SERVER_ID &&
+      !server?.online
+    )
+      return status(
+        "error",
+        "Location unavailable",
+        "Websites won't load until you choose another global location.",
+      );
     const via = server
       ? `${server.city}, ${server.country}`
-      : routing.globalServerId === INTERNAL_DEFAULT_SERVER_ID
-        ? "your VPN server"
-        : "an unavailable server";
+      : "your VPN server";
     // Rules and exclusions override the global route for their hosts.
     const exceptions = [
       rules ? plural(rules, "website rule") : "",

@@ -209,20 +209,40 @@ test("App browser workflows, responsive layout and keyboard focus", async () => 
     await wait(
       "document.body.textContent.includes('Local address. It always connects directly.')",
     );
-    // A favorite that left the server list keeps its star so it can be removed.
-    await cdp("Page.navigate", { url: `${server.url}popup.html?retired` });
-    // A disabled fieldset disables its buttons without setting their disabled property.
+    // A favorite that left the server list keeps its star so it can be removed,
+    // also when the loaded list is empty.
+    for (const query of ["retired", "retired&empty"]) {
+      await cdp("Page.navigate", { url: `${server.url}popup.html?${query}` });
+      // A disabled fieldset disables its buttons without setting their disabled property.
+      await wait(
+        "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Change global location' && !b.matches(':disabled'))",
+      );
+      await click("Change global location");
+      await wait(
+        "document.querySelector('.server-list li')?.textContent.includes('No longer listed')",
+      );
+      await evaluate("document.querySelector('.server-list .star').click()");
+      await wait(
+        "!document.querySelector('.server-list').textContent.includes('No longer listed')",
+      );
+    }
+    // An outdated list refreshes beside the picker, without disabling or announcing it.
+    await cdp("Page.navigate", { url: `${server.url}popup.html?stale` });
     await wait(
       "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Change global location' && !b.matches(':disabled'))",
     );
     await click("Change global location");
     await wait(
-      "document.querySelector('.server-list li')?.textContent.includes('No longer listed')",
+      "document.querySelector('.meta-row .meta')?.textContent.startsWith('Updated ')",
     );
-    await evaluate("document.querySelector('.server-list .star').click()");
-    await wait(
-      "!document.querySelector('.server-list').textContent.includes('No longer listed')",
-    );
+    expect(
+      await evaluate("document.querySelector('.feedback').textContent"),
+    ).toBe("");
+    expect(
+      await evaluate(
+        "document.querySelector('.meta-row button').getAttribute('aria-label')",
+      ),
+    ).toBe("Refresh server list");
     await cdp("Page.navigate", { url: `${server.url}options.html` });
     await wait("document.body.textContent.includes('Website rules')");
     // Typed URLs fail inline, before any command reaches the worker.
@@ -345,6 +365,43 @@ test("App browser workflows, responsive layout and keyboard focus", async () => 
         await evaluate("document.documentElement.scrollWidth <= innerWidth"),
       ).toBe(true);
     }
+    // Incognito windows can't refresh the list, so the picker says where to do it.
+    await cdp("Page.navigate", {
+      url: `${server.url}popup.html?incognito&stale`,
+    });
+    await wait(
+      "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Change global location' && !b.matches(':disabled'))",
+    );
+    await click("Change global location");
+    await wait(
+      "document.querySelector('.hint')?.textContent === 'Refresh the server list from a regular window.'",
+    );
+    // A refused refresh would surface as an alert a moment after the picker opens.
+    await Bun.sleep(100);
+    expect(
+      await evaluate(
+        "!document.querySelector('[role=alert]') && !document.querySelector('.meta-row button')",
+      ),
+    ).toBe(true);
+    // A long list scrolls inside the picker: the page gains no height below the popup, and the
+    // list gives way so the last button stays in view.
+    await cdp("Page.navigate", {
+      url: `${server.url}popup.html?incognito&many`,
+    });
+    await wait(
+      "Array.from(document.querySelectorAll('button')).some(b => b.textContent.trim() === 'Change global location' && !b.matches(':disabled'))",
+    );
+    await click("Change global location");
+    await wait("document.querySelectorAll('.server-list li').length === 60");
+    expect(
+      await evaluate(
+        `(() => {
+          const bottom = (selector) => document.querySelector(selector).getBoundingClientRect().bottom;
+          const last = Array.from(document.querySelectorAll('button')).find(b => b.textContent.trim() === 'Use your VPN server');
+          return document.documentElement.scrollHeight <= Math.max(innerHeight, Math.ceil(bottom('.popup') + scrollY)) && last.getBoundingClientRect().bottom <= bottom('main');
+        })()`,
+      ),
+    ).toBe(true);
     await cdp("Page.navigate", { url: `${server.url}popup.html?incognito` });
     // A spanning worker cannot run checks on the private route, so private popups never start them.
     await wait(

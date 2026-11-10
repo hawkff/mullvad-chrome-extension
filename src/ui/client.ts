@@ -92,13 +92,7 @@ const proxy = shape({
   status,
   message: optional(text),
   scope: context,
-  settingScope: oneOf(
-    "regular",
-    "regular_only",
-    "incognito_persistent",
-    "incognito_session_only",
-    "unknown",
-  ),
+  settingScope: oneOf("regular", "incognito_session_only", "unknown"),
 });
 const observation = shape({
   ip: text,
@@ -223,23 +217,21 @@ export function searchServers(servers: Server[], query: string): Server[] {
       ),
     );
 }
-export const STALE_AFTER = 24 * 60 * 60 * 1000;
+export const formatTime = (time: number) =>
+  new Date(time).toLocaleString([], {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+const STALE_AFTER = 24 * 60 * 60 * 1000;
+export const isStale = (state: LoadState<unknown>) =>
+  state.status !== "ready" || Date.now() - state.updatedAt > STALE_AFTER;
 export function freshness(state: LoadState<unknown>): string {
   if (state.status === "ready") {
     if (!state.updatedAt) return "Updated at an unknown time";
-    const when = new Date(state.updatedAt).toLocaleString([], {
-      dateStyle: "medium",
-      timeStyle: "short",
-    });
-    return Date.now() - state.updatedAt > STALE_AFTER
-      ? `Stale · updated ${when}`
-      : `Updated ${when}`;
+    const when = formatTime(state.updatedAt);
+    return isStale(state) ? `Stale · updated ${when}` : `Updated ${when}`;
   }
-  if (state.status === "unknown" || state.status === "pending")
-    return state.status === "unknown" ? "Not checked" : "Checking…";
-  return "message" in state
-    ? `${state.status}: ${state.message}`
-    : "Not checked";
+  return "message" in state ? state.message : "Never updated";
 }
 
 export type Observed = LoadState<ConnectionObservation | DnsObservation[]>;
@@ -319,19 +311,12 @@ export function exitStatus({
 }
 
 export function incognitoScopeDescription(proxy: ProxyStatus): string {
-  if (!proxy.applied) return "Chrome hasn't confirmed the Incognito routing.";
-  switch (proxy.settingScope) {
-    case "regular":
-      return "Incognito uses your regular routing. Changes you make here last until you close the last Incognito window.";
-    case "incognito_session_only":
-      return "Incognito uses its own routing until you close the last Incognito window.";
-    case "regular_only":
-      return "Your regular routing doesn't apply in Incognito.";
-    case "incognito_persistent":
-      return "Chrome reports an Incognito setting that stays after the windows close.";
-    default:
-      return "Chrome hasn't confirmed which routing Incognito uses.";
-  }
+  // Routing that is off has no PAC to apply; only a failed status is unconfirmed.
+  if (proxy.status !== "ready")
+    return "Chrome hasn't confirmed the Incognito routing.";
+  return proxy.settingScope === "incognito_session_only"
+    ? "Incognito uses its own routing until you close the last Incognito window."
+    : "Incognito uses your regular routing. Changes you make here last until you close the last Incognito window.";
 }
 
 export async function resolveUiContext(): Promise<BrowserContext> {

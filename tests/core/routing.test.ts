@@ -82,6 +82,12 @@ describe("canonical hosts and local literal bypass", () => {
       "[::1%eth0]",
     ])
       expect(canonicalHost(host).ok).toBe(false);
+    // A name the URL parser rejects gets the same guidance, not the parser's error.
+    expect(canonicalHost("bücher<.de")).toEqual({
+      ok: false,
+      error:
+        "Enter a domain such as example.com, without https://, a path or a port.",
+    });
   });
   test("IPv4, IPv6 and mapped literals; no DNS resolution", () => {
     const ctx = context();
@@ -411,9 +417,10 @@ test("PSL wildcard and exception parent semantics match the PAC", () => {
 
 test("generated PAC uses only ASCII for Chrome proxy settings", () => {
   const input = context();
-  const server = input.servers[0];
-  if (!server) throw new Error("Missing fixture server");
-  server.country = "Sverige å 😀";
+  // Server IDs are free-form strings, so they can carry any character into the PAC.
+  input.settings.rules = [
+    { host: "example.org", enabled: true, serverId: "Sverige å 😀" },
+  ];
   const pac = generatePac(input);
   expect([...pac].every((character) => character.charCodeAt(0) < 128)).toBe(
     true,
@@ -424,6 +431,40 @@ test("generated PAC uses only ASCII for Chrome proxy settings", () => {
   expect(
     sandbox.FindProxyForURL?.("https://example.com", "example.com"),
   ).toContain("SOCKS5");
+});
+
+test("the PAC carries only the endpoints its routes can pick", () => {
+  const ctx = context();
+  const other = {
+    ...servers[0],
+    id: "other.mullvad.net",
+    hostname: "other.mullvad.net",
+    ipv4: "1.2.3.4",
+  };
+  ctx.servers.push(other, {
+    ...other,
+    id: "down.mullvad.net",
+    hostname: "down.mullvad.net",
+    online: false,
+  });
+  const chosen = generatePac(ctx);
+  expect(chosen).toContain(id);
+  for (const unused of ["other.mullvad.net", servers[0].ipv6])
+    expect(chosen).not.toContain(unused);
+  ctx.settings.randomMode = true;
+  const random = generatePac(ctx);
+  for (const needed of [id, "other.mullvad.net"])
+    expect(random).toContain(needed);
+  expect(random).not.toContain("down.mullvad.net");
+  check(ctx, ["example.com", "example.org", "localhost"]);
+  // A stored pool may repeat an ID; the PAC must still decide like the engine.
+  const repeated = context();
+  repeated.settings.randomMode = true;
+  repeated.servers.unshift({ ...servers[0], online: false });
+  expect(resolveRoute("example.com", repeated).kind).toBe("blocked");
+  check(repeated, ["example.com"]);
+  // The seed stays in every mode, so a private PAC never equals the regular one.
+  expect(chosen).toContain("session-a");
 });
 
 test("missing and offline routes block only their destinations in engine and PAC", () => {

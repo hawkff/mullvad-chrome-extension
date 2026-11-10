@@ -434,38 +434,48 @@ test("random mode stays off until the session pool has an online server", async 
   expect(regular).toEqual({ mode: "system" });
   expect((await snapshot(controller)).settings.routing.randomMode).toBe(false);
 });
-test("connection checks do not hold routing changes", async () => {
-  let release: (() => void) | undefined;
-  const fetcher = spyOn(globalThis, "fetch").mockImplementation(
-    (() =>
-      new Promise<Response>((resolve) => {
-        release = () =>
-          resolve(Response.json({ ip: "198.51.100.1", mullvad_exit_ip: true }));
-      })) as unknown as typeof fetch,
-  );
-  try {
-    const controller = new Controller(routingCore);
-    const check = controller.client({
-      type: "diagnostics.run",
-      checks: ["ipv4"],
-    });
-    for (let i = 0; i < 100 && !release; i++) await Bun.sleep(1);
-    expect(release).toBeDefined();
-    // This would wait forever if the hanging check held the command queue.
-    const update = await controller.client({
-      type: "settings.update",
-      patch: { autoReload: true },
-    });
-    expect(update.ok).toBe(true);
-    release?.();
-    const result = await check;
-    if (!result.ok) throw new Error(result.error.message);
-    expect(result.value.diagnostics.ipv4.status).toBe("ready");
-    expect(result.value.settings.preferences.autoReload).toBe(true);
-  } finally {
-    fetcher.mockRestore();
-  }
-});
+const networkCommands: Extract<
+  Command,
+  { type: "diagnostics.run" | "servers.refresh" }
+>[] = [
+  { type: "diagnostics.run", checks: ["ipv4"] },
+  { type: "servers.refresh" },
+];
+for (const command of networkCommands)
+  test(`a slow ${command.type} does not hold routing changes`, async () => {
+    let release: (() => void) | undefined;
+    const fetcher = spyOn(globalThis, "fetch").mockImplementation(
+      (() =>
+        new Promise<Response>((resolve) => {
+          release = () =>
+            resolve(
+              Response.json({ ip: "198.51.100.1", mullvad_exit_ip: true }),
+            );
+        })) as unknown as typeof fetch,
+    );
+    try {
+      const controller = new Controller(routingCore);
+      const pending = controller.client(command);
+      for (let i = 0; i < 100 && !release; i++) await Bun.sleep(1);
+      expect(release).toBeDefined();
+      // This would wait forever if the hanging request held the command queue.
+      const update = await controller.client({
+        type: "settings.update",
+        patch: { autoReload: true },
+      });
+      expect(update.ok).toBe(true);
+      release?.();
+      const result = await pending;
+      // The injected core rejects every server list, so only the check succeeds.
+      expect(result.ok).toBe(command.type === "diagnostics.run");
+      if (result.ok) {
+        expect(result.value.diagnostics.ipv4.status).toBe("ready");
+        expect(result.value.settings.preferences.autoReload).toBe(true);
+      }
+    } finally {
+      fetcher.mockRestore();
+    }
+  });
 test("favorites change only from regular windows and never create a private override", async () => {
   const controller = new Controller(routingCore);
   expect(
@@ -909,17 +919,18 @@ describe("real-core persisted routing", () => {
   });
   test("a stored relay list is not reported as a failed refresh", async () => {
     const controller = new Controller();
-    await controller.client({
-      type: "settings.update",
-      patch: { enabled: true },
-    });
+    await refresh(controller, [wire]);
+    await controller.client({ type: "server.select", serverId: wire.hostname });
     Object.assign(chrome.proxy.settings, {
       set: async () => {
         throw new Error("set failed");
       },
     });
+    // The chosen relay's new address changes the PAC, so Chrome must take it again.
     const fetcher = spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify([wire])),
+      new Response(
+        JSON.stringify([{ ...wire, ipv4_address: "185.213.154.99" }]),
+      ),
     );
     try {
       const result = await controller.client({ type: "servers.refresh" });
@@ -932,8 +943,82 @@ describe("real-core persisted routing", () => {
       fetcher.mockRestore();
     }
     expect(local["servers.v1"]).toMatchObject({
-      value: [{ id: wire.hostname }],
+      value: [{ id: wire.hostname, ipv4: "185.213.154.99" }],
     });
+  });
+  test("an unavailable global location is flagged and cannot be switched back on", async () => {
+    const controller = new Controller();
+    await refresh(controller, [wire]);
+    await controller.client({ type: "server.select", serverId: wire.hostname });
+    await refresh(controller, [{ ...wire, online: false }]);
+    // The PAC now blocks every website, so the toolbar must not read "on".
+    expect(toolbar.badge).toBe("!");
+    expect(toolbar.title).toBe(
+      "Mullvad Proxy is blocked. Websites won't load until you choose another global location.",
+    );
+    expect(
+      (
+        await controller.client({
+          type: "settings.update",
+          patch: { enabled: false },
+        })
+      ).ok,
+    ).toBe(true);
+    const before = structuredClone({ local, regular });
+    expect(
+      await controller.client({
+        type: "settings.update",
+        patch: { enabled: true },
+      }),
+    ).toMatchObject({ ok: false, error: { code: "invalid-input" } });
+    expect({ local, regular }).toEqual(before);
+  });
+  test("overlapping refreshes share one download", async () => {
+    let release: (() => void) | undefined;
+    let downloads = 0;
+    const fetcher = spyOn(globalThis, "fetch").mockImplementation((() => {
+      downloads++;
+      return new Promise<Response>((resolve) => {
+        release = () => resolve(new Response(JSON.stringify([wire])));
+      });
+    }) as unknown as typeof fetch);
+    try {
+      const controller = new Controller();
+      const pending = [1, 2].map(() =>
+        controller.client({ type: "servers.refresh" }),
+      );
+      for (let i = 0; i < 100 && !release; i++) await Bun.sleep(1);
+      release?.();
+      for (const result of await Promise.all(pending))
+        expect(result.ok).toBe(true);
+      expect(downloads).toBe(1);
+    } finally {
+      fetcher.mockRestore();
+    }
+  });
+  test("an Incognito choice equal to the regular route still gets its own override", async () => {
+    const controller = new Controller();
+    await controller.client({
+      type: "server.select",
+      serverId: "internal-default",
+    });
+    const chosen = await controller.client({
+      type: "server.select",
+      serverId: "internal-default",
+      context: "incognito",
+    });
+    if (!chosen.ok) throw new Error(chosen.error.message);
+    // Equal routing must not pass for the inherited regular setting.
+    expect(chosen.value.incognitoProxy.settingScope).toBe(
+      "incognito_session_only",
+    );
+    await controller.client({
+      type: "settings.update",
+      patch: { enabled: false },
+    });
+    expect(
+      installedPac(privateProxy)("https://example.org", "example.org"),
+    ).toBe("SOCKS5 10.64.0.1:1080");
   });
   test("server refresh re-applies an active private override", async () => {
     const controller = new Controller();

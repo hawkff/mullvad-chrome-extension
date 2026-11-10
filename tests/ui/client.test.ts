@@ -94,10 +94,10 @@ test("location search combines country, city and hostname case-insensitively", (
   ).toEqual(["Germany", "Sweden"]);
 });
 test("freshness distinguishes unknown, blocked and stale data", () => {
-  expect(freshness({ status: "unknown" })).toBe("Not checked");
+  expect(freshness({ status: "unknown" })).toBe("Never updated");
   expect(
     freshness({ status: "blocked", message: "Incognito unavailable" }),
-  ).toContain("Incognito unavailable");
+  ).toBe("Incognito unavailable");
   expect(freshness({ status: "ready", updatedAt: 1, value: [] })).toContain(
     "Stale",
   );
@@ -128,9 +128,17 @@ test("status summary names route exceptions and any non-Mullvad address", () => 
     detail:
       "All websites via Gothenburg, Sweden, except 1 website rule and 1 exclusion.",
   });
-  routing.globalServerId = "retired";
+  // A delisted or offline global server makes the PAC block every website.
+  for (const unavailable of ["retired", "de-ber-001"]) {
+    routing.globalServerId = unavailable;
+    expect(proxyStatus(snapshot.proxy, routing, servers)).toMatchObject({
+      tone: "error",
+      title: "Location unavailable",
+    });
+  }
+  routing.globalServerId = "internal-default";
   expect(proxyStatus(snapshot.proxy, routing, servers).detail).toContain(
-    "via an unavailable server",
+    "via your VPN server",
   );
   routing.enabled = false;
   snapshot.proxy.applied = false;
@@ -237,25 +245,29 @@ test("connection checks describe only websites on their route", () => {
   ).toBe(false);
 });
 
-test("Incognito scope labels distinguish inheritance, overrides and unknown state", () => {
-  const proxy = { ...fixture.incognitoProxy, applied: true };
-  expect(
-    incognitoScopeDescription({ ...proxy, settingScope: "regular" }),
-  ).toContain("Incognito uses your regular routing");
-  expect(
-    incognitoScopeDescription({
-      ...proxy,
-      settingScope: "incognito_session_only",
-    }),
-  ).toContain("its own routing until you close the last Incognito window");
-  expect(incognitoScopeDescription(proxy)).toContain("hasn't confirmed which");
-  expect(
-    incognitoScopeDescription({
-      ...proxy,
-      applied: false,
-      settingScope: "regular",
-    }),
-  ).not.toContain("regular routing");
+test("Incognito scope labels distinguish inheritance, overrides and failures", () => {
+  const proxy = { ...fixture.incognitoProxy, status: "ready" as const };
+  // With routing off no PAC is applied, and Incognito still follows regular windows.
+  for (const applied of [false, true])
+    expect(
+      incognitoScopeDescription({ ...proxy, applied, settingScope: "regular" }),
+    ).toContain("Incognito uses your regular routing");
+  expect(incognitoScopeDescription(proxy)).toContain(
+    "Incognito uses your regular routing",
+  );
+  // Turning the proxy off in Incognito is a confirmed override without a PAC.
+  for (const applied of [false, true])
+    expect(
+      incognitoScopeDescription({
+        ...proxy,
+        applied,
+        settingScope: "incognito_session_only",
+      }),
+    ).toContain("its own routing until you close the last Incognito window");
+  for (const status of ["error", "blocked"] as const)
+    expect(
+      incognitoScopeDescription({ ...proxy, applied: true, status }),
+    ).toContain("hasn't confirmed");
 });
 
 test("window context resolves before UI mount and never defaults on failure", async () => {

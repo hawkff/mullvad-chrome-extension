@@ -74,7 +74,12 @@ export function host(value: unknown): string {
   }
   let ascii = input;
   if (Array.from(input).some((character) => character.charCodeAt(0) > 127)) {
-    ascii = new URL(`http://${input}`).hostname;
+    try {
+      ascii = new URL(`http://${input}`).hostname;
+    } catch {
+      // An empty host fails below with the message people can act on.
+      ascii = "";
+    }
   }
   const result = engine.canonical(ascii);
   if (!result)

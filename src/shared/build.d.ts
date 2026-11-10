@@ -4,7 +4,7 @@ declare module "*.LICENSE" {
   const text: string;
   export default text;
 }
-declare module "tldts/dist/index.umd.min.js" {
+declare module "tldts-icann/dist/index.umd.min.js" {
   const text: string;
   export default text;
 }
