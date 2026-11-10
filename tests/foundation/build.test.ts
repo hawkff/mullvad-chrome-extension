@@ -6,7 +6,9 @@ import manifest from "../../public/manifest.json";
 
 test("manifest confines extension execution and network access", () => {
   expect(manifest.manifest_version).toBe(3);
-  expect(manifest.minimum_chrome_version).toBe("102");
+  // Mullvad's API asks for a TLS client certificate. Before Chrome 128 that makes a service
+  // worker's request fail, so the worker could never load the server list.
+  expect(manifest.minimum_chrome_version).toBe("128");
   expect(manifest.incognito).toBe("spanning");
   expect(manifest.permissions).toEqual(["storage", "proxy", "activeTab"]);
   expect(manifest.optional_permissions).toEqual(["privacy"]);
